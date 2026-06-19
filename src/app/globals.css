@@ -1,26 +1,73 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #f7efe2;
+  --foreground: #1e2725;
+  --paper: #fbf7ee;
+  --ink: #1e2725;
+  --indigo: #223a54;
+  --aizome: #2f6073;
+  --vermillion: #c34d36;
+  --moss: #7f8f68;
+  --tatami: #c6b68a;
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --font-sans: "Geist", "Geist Fallback", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "Geist Mono", "Geist Mono Fallback", ui-monospace, monospace;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+* {
+  box-sizing: border-box;
+}
+
+html {
+  background: var(--background);
 }
 
 body {
-  background: var(--background);
+  min-height: 100vh;
+  background:
+    radial-gradient(circle at 10% 8%, rgba(195, 77, 54, 0.12), transparent 30%),
+    linear-gradient(135deg, #f8efe1 0%, #f4ecdf 44%, #e8efe9 100%);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-geist-sans), "Geist", ui-sans-serif, system-ui, sans-serif;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+.font-blueprint {
+  font-family: var(--font-blueprint), "Geist Mono", ui-monospace, monospace;
+}
+
+.canvas-grid {
+  background-color: #e5dccb;
+  background-image:
+    linear-gradient(rgba(34, 58, 84, 0.13) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(34, 58, 84, 0.13) 1px, transparent 1px),
+    linear-gradient(rgba(34, 58, 84, 0.06) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(34, 58, 84, 0.06) 1px, transparent 1px);
+  background-position: -1px -1px;
+  background-size: 72px 72px, 72px 72px, 12px 12px, 12px 12px;
+}
+
+.paper-panel {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.72), rgba(255, 255, 255, 0.42)),
+    var(--paper);
+  border: 1px solid rgba(30, 39, 37, 0.12);
+  box-shadow: 0 18px 50px rgba(41, 35, 24, 0.08);
+}
+
+.blueprint-panel {
+  background:
+    linear-gradient(rgba(255, 255, 255, 0.06) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.06) 1px, transparent 1px),
+    #20384f;
+  background-size: 18px 18px;
 }
