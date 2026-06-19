@@ -10,7 +10,7 @@ import {
   useState,
 } from "react";
 import { jsPDF } from "jspdf";
-import Konva from "konva";
+import type Konva from "konva";
 import {
   Group,
   Image as KonvaImage,
@@ -23,13 +23,19 @@ import {
 } from "react-konva";
 import {
   AlertTriangle,
+  ArrowDown,
+  ArrowLeft,
+  ArrowRight,
+  ArrowUp,
   Check,
   Copy,
   Download,
   FileDown,
+  FileUp,
   Hand,
   Home,
   Lock,
+  Magnet,
   MousePointer2,
   Move,
   Plus,
@@ -48,7 +54,9 @@ const STORAGE_KEY = "will-it-fit-layout-v1";
 const DEFAULT_PIXELS_PER_FOOT = 28;
 const MIN_FURNITURE_FEET = 0.5;
 
-type ToolMode = "move" | "pan" | "calibrate";
+type ToolMode = "move" | "pan" | "calibrate" | "measure";
+type MobilePanel = "plan" | "add" | "edit" | "export";
+type NudgeDirection = "up" | "down" | "left" | "right";
 
 type PlanImage = {
   src: string;
@@ -96,6 +104,7 @@ type FurnitureItem = {
   name: string;
   widthFt: number;
   depthFt: number;
+  clearanceFt?: number;
   x: number;
   y: number;
   rotation: number;
@@ -103,10 +112,22 @@ type FurnitureItem = {
   accent: string;
 };
 
+type MeasurementItem = {
+  id: string;
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+  label: string;
+};
+
 type SavedLayout = {
   plan: PlanImage | null;
   calibration: Calibration;
   furniture: FurnitureItem[];
+  measurements?: MeasurementItem[];
+  showClearances?: boolean;
+  snapToGrid?: boolean;
 };
 
 type PdfPageProxy = {
@@ -291,10 +312,15 @@ function getItemPixels(item: FurnitureItem, pixelsPerFoot: number) {
   };
 }
 
-function getFurnitureCorners(item: FurnitureItem, pixelsPerFoot: number) {
+function getFurnitureCorners(
+  item: FurnitureItem,
+  pixelsPerFoot: number,
+  extraFeet = 0,
+) {
   const { width, depth } = getItemPixels(item, pixelsPerFoot);
-  const halfWidth = width / 2;
-  const halfDepth = depth / 2;
+  const extraPixels = Math.max(0, extraFeet) * pixelsPerFoot;
+  const halfWidth = width / 2 + extraPixels;
+  const halfDepth = depth / 2 + extraPixels;
   const radians = (item.rotation * Math.PI) / 180;
   const cos = Math.cos(radians);
   const sin = Math.sin(radians);
@@ -511,6 +537,24 @@ function drawRoundedRect(
   ctx.closePath();
 }
 
+function normalizeFurniture(items: FurnitureItem[] | undefined) {
+  return (items ?? []).map((item) => ({
+    ...item,
+    clearanceFt: Math.max(0, safeNumber(item.clearanceFt ?? 0, 0)),
+  }));
+}
+
+function normalizeLayout(layout: Partial<SavedLayout>): SavedLayout {
+  return {
+    plan: layout.plan ?? null,
+    calibration: layout.calibration ?? initialCalibration,
+    furniture: normalizeFurniture(layout.furniture),
+    measurements: layout.measurements ?? [],
+    showClearances: layout.showClearances ?? true,
+    snapToGrid: layout.snapToGrid ?? true,
+  };
+}
+
 export function WillItFitApp() {
   const [plan, setPlan] = useState<PlanImage | null>(null);
   const [backgroundImage, setBackgroundImage] =
@@ -524,6 +568,12 @@ export function WillItFitApp() {
   const [stageScale, setStageScale] = useState(1);
   const [stagePosition, setStagePosition] = useState({ x: 80, y: 80 });
   const [draftLine, setDraftLine] = useState<CalibrationLine | null>(null);
+  const [measurements, setMeasurements] = useState<MeasurementItem[]>([]);
+  const [draftMeasurement, setDraftMeasurement] =
+    useState<CalibrationLine | null>(null);
+  const [showClearances, setShowClearances] = useState(true);
+  const [snapToGrid, setSnapToGrid] = useState(true);
+  const [mobilePanel, setMobilePanel] = useState<MobilePanel>("add");
   const [knownFeet, setKnownFeet] = useState("12");
   const [knownInches, setKnownInches] = useState("0");
   const [customName, setCustomName] = useState("Bookcase");
@@ -540,8 +590,10 @@ export function WillItFitApp() {
   const transformerRef = useRef<Konva.Transformer>(null);
   const canvasShellRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const importInputRef = useRef<HTMLInputElement>(null);
   const itemRefs = useRef<Record<string, Konva.Group | null>>({});
   const calibrationStartRef = useRef<{ x: number; y: number } | null>(null);
+  const measurementStartRef = useRef<{ x: number; y: number } | null>(null);
   const pinchGestureRef = useRef<PinchGesture | null>(null);
   const interactionRef = useRef(false);
 
@@ -571,6 +623,69 @@ export function WillItFitApp() {
 
     return ids;
   }, [furniture, pixelsPerFoot]);
+
+  const clearanceConflictIds = useMemo(() => {
+    const ids = new Set<string>();
+
+    for (const item of furniture) {
+      const clearanceFt = item.clearanceFt ?? 0;
+
+      if (clearanceFt <= 0) {
+        continue;
+      }
+
+      const clearanceCorners = getFurnitureCorners(
+        item,
+        pixelsPerFoot,
+        clearanceFt,
+      );
+
+      for (const other of furniture) {
+        if (other.id === item.id) {
+          continue;
+        }
+
+        if (
+          polygonsOverlap(
+            clearanceCorners,
+            getFurnitureCorners(other, pixelsPerFoot),
+          )
+        ) {
+          ids.add(item.id);
+          ids.add(other.id);
+        }
+      }
+    }
+
+    return ids;
+  }, [furniture, pixelsPerFoot]);
+
+  const totalFootprintSqFt = useMemo(
+    () =>
+      furniture.reduce(
+        (total, item) => total + item.widthFt * item.depthFt,
+        0,
+      ),
+    [furniture],
+  );
+
+  const layoutIssues = overlapIds.size + clearanceConflictIds.size;
+  const visibleMeasurements = useMemo(() => {
+    if (!draftMeasurement) {
+      return measurements;
+    }
+
+    return [
+      ...measurements,
+      {
+        id: "draft-measurement",
+        ...draftMeasurement,
+        label: isCalibrated
+          ? formatFeet(distance(draftMeasurement) / pixelsPerFoot)
+          : `${Math.round(distance(draftMeasurement))} px`,
+      },
+    ];
+  }, [draftMeasurement, isCalibrated, measurements, pixelsPerFoot]);
 
   const fitToPlan = useCallback(() => {
     if (!plan) {
@@ -602,10 +717,13 @@ export function WillItFitApp() {
 
       if (saved) {
         try {
-          const parsed = JSON.parse(saved) as SavedLayout;
-          setPlan(parsed.plan ?? null);
-          setCalibration(parsed.calibration ?? initialCalibration);
-          setFurniture(parsed.furniture ?? []);
+          const parsed = normalizeLayout(JSON.parse(saved) as Partial<SavedLayout>);
+          setPlan(parsed.plan);
+          setCalibration(parsed.calibration);
+          setFurniture(parsed.furniture);
+          setMeasurements(parsed.measurements ?? []);
+          setShowClearances(parsed.showClearances ?? true);
+          setSnapToGrid(parsed.snapToGrid ?? true);
           setStatus("Restored local layout");
         } catch {
           setStatus("Started a fresh layout");
@@ -626,7 +744,14 @@ export function WillItFitApp() {
     }
 
     const saveTimer = window.setTimeout(() => {
-      const payload: SavedLayout = { plan, calibration, furniture };
+      const payload: SavedLayout = {
+        plan,
+        calibration,
+        furniture,
+        measurements,
+        showClearances,
+        snapToGrid,
+      };
 
       try {
         window.localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
@@ -638,7 +763,15 @@ export function WillItFitApp() {
     return () => {
       window.clearTimeout(saveTimer);
     };
-  }, [calibration, furniture, hasHydrated, plan]);
+  }, [
+    calibration,
+    furniture,
+    hasHydrated,
+    measurements,
+    plan,
+    showClearances,
+    snapToGrid,
+  ]);
 
   useEffect(() => {
     if (!plan?.src) {
@@ -680,6 +813,28 @@ export function WillItFitApp() {
 
     return () => {
       observer.disconnect();
+    };
+  }, []);
+
+  useEffect(() => {
+    const shell = canvasShellRef.current;
+
+    if (!shell) {
+      return;
+    }
+
+    const holdCanvasGesture = (event: TouchEvent) => {
+      if (event.cancelable) {
+        event.preventDefault();
+      }
+    };
+
+    shell.addEventListener("touchstart", holdCanvasGesture, { passive: false });
+    shell.addEventListener("touchmove", holdCanvasGesture, { passive: false });
+
+    return () => {
+      shell.removeEventListener("touchstart", holdCanvasGesture);
+      shell.removeEventListener("touchmove", holdCanvasGesture);
     };
   }, []);
 
@@ -728,6 +883,19 @@ export function WillItFitApp() {
       y: (pointer.y - stage.y()) / stage.scaleY(),
     };
   }, []);
+
+  const snapPoint = useCallback((point: Point) => {
+    if (!snapToGrid) {
+      return point;
+    }
+
+    const increment = pixelsPerFoot / 2;
+
+    return {
+      x: Math.round(point.x / increment) * increment,
+      y: Math.round(point.y / increment) * increment,
+    };
+  }, [pixelsPerFoot, snapToGrid]);
 
   const getTouchPair = (event: TouchEvent) => {
     const stage = stageRef.current;
@@ -801,17 +969,19 @@ export function WillItFitApp() {
 
   const addFurniture = useCallback(
     (template: FurnitureTemplate, position?: { x: number; y: number }) => {
-      const fallback = {
+      const fallback = snapPoint({
         x: (stageSize.width / 2 - stagePosition.x) / stageScale,
         y: (stageSize.height / 2 - stagePosition.y) / stageScale,
-      };
+      });
+      const nextPosition = snapPoint(position ?? fallback);
       const nextItem: FurnitureItem = {
         id: createId(template.id),
         name: template.name,
         widthFt: template.widthFt,
         depthFt: template.depthFt,
-        x: position?.x ?? fallback.x,
-        y: position?.y ?? fallback.y,
+        clearanceFt: 0,
+        x: nextPosition.x,
+        y: nextPosition.y,
         rotation: 0,
         color: template.color,
         accent: template.accent,
@@ -820,8 +990,16 @@ export function WillItFitApp() {
       setFurniture((items) => [...items, nextItem]);
       setSelectedId(nextItem.id);
       setTool("move");
+      setMobilePanel("edit");
     },
-    [stagePosition.x, stagePosition.y, stageScale, stageSize.height, stageSize.width],
+    [
+      snapPoint,
+      stagePosition.x,
+      stagePosition.y,
+      stageScale,
+      stageSize.height,
+      stageSize.width,
+    ],
   );
 
   const updateSelected = useCallback(
@@ -844,6 +1022,13 @@ export function WillItFitApp() {
                   MIN_FURNITURE_FEET,
                   safeNumber(updates.depthFt ?? item.depthFt, item.depthFt),
                 ),
+                clearanceFt: Math.max(
+                  0,
+                  safeNumber(
+                    updates.clearanceFt ?? item.clearanceFt ?? 0,
+                    item.clearanceFt ?? 0,
+                  ),
+                ),
               }
             : item,
         ),
@@ -861,6 +1046,32 @@ export function WillItFitApp() {
       items.map((item) =>
         item.id === selectedId
           ? { ...item, rotation: (item.rotation + degrees + 360) % 360 }
+          : item,
+      ),
+    );
+  };
+
+  const nudgeSelected = (direction: NudgeDirection) => {
+    if (!selectedId) {
+      return;
+    }
+
+    const step = snapToGrid ? pixelsPerFoot / 2 : pixelsPerFoot / 4;
+    const movement = {
+      up: { x: 0, y: -step },
+      down: { x: 0, y: step },
+      left: { x: -step, y: 0 },
+      right: { x: step, y: 0 },
+    }[direction];
+
+    setFurniture((items) =>
+      items.map((item) =>
+        item.id === selectedId
+          ? {
+              ...item,
+              x: item.x + movement.x,
+              y: item.y + movement.y,
+            }
           : item,
       ),
     );
@@ -918,6 +1129,20 @@ export function WillItFitApp() {
       if (event.key.toLowerCase() === "r" && selectedId) {
         event.preventDefault();
         rotateSelected(15);
+      }
+
+      if (selectedId && event.key.startsWith("Arrow")) {
+        const direction = {
+          ArrowUp: "up",
+          ArrowDown: "down",
+          ArrowLeft: "left",
+          ArrowRight: "right",
+        }[event.key] as NudgeDirection | undefined;
+
+        if (direction) {
+          event.preventDefault();
+          nudgeSelected(direction);
+        }
       }
     };
 
@@ -1085,6 +1310,18 @@ export function WillItFitApp() {
       return;
     }
 
+    if (tool === "measure" && point) {
+      measurementStartRef.current = point;
+      setDraftMeasurement({
+        x1: point.x,
+        y1: point.y,
+        x2: point.x,
+        y2: point.y,
+      });
+      setSelectedId(null);
+      return;
+    }
+
     const stage = event.target.getStage();
     const clickedEmpty =
       event.target === stage ||
@@ -1112,6 +1349,22 @@ export function WillItFitApp() {
     }
 
     if (pinchGestureRef.current) {
+      return;
+    }
+
+    if (tool === "measure" && measurementStartRef.current) {
+      const point = getWorldPointer();
+
+      if (!point) {
+        return;
+      }
+
+      setDraftMeasurement({
+        x1: measurementStartRef.current.x,
+        y1: measurementStartRef.current.y,
+        x2: point.x,
+        y2: point.y,
+      });
       return;
     }
 
@@ -1146,6 +1399,29 @@ export function WillItFitApp() {
         }
         return;
       }
+    }
+
+    if (tool === "measure") {
+      if (draftMeasurement && measurementStartRef.current) {
+        const measuredPixels = distance(draftMeasurement);
+
+        if (measuredPixels > 8) {
+          setMeasurements((items) => [
+            ...items,
+            {
+              id: createId("measure"),
+              ...draftMeasurement,
+              label: isCalibrated
+                ? formatFeet(measuredPixels / pixelsPerFoot)
+                : `${Math.round(measuredPixels)} px`,
+            },
+          ]);
+        }
+      }
+
+      measurementStartRef.current = null;
+      setDraftMeasurement(null);
+      return;
     }
 
     if (tool !== "calibrate" || !draftLine || !calibrationStartRef.current) {
@@ -1255,6 +1531,8 @@ export function WillItFitApp() {
     setPlan(sample);
     setCalibration(initialCalibration);
     setFurniture([]);
+    setMeasurements([]);
+    setDraftMeasurement(null);
     setSelectedId(null);
     setShouldFitPlan(true);
     setStatus("Sample floor plan loaded");
@@ -1271,8 +1549,10 @@ export function WillItFitApp() {
     setBackgroundImage(null);
     setCalibration(initialCalibration);
     setFurniture([]);
+    setMeasurements([]);
     setSelectedId(null);
     setDraftLine(null);
+    setDraftMeasurement(null);
     setStageScale(1);
     setStagePosition({ x: 80, y: 80 });
     window.localStorage.removeItem(STORAGE_KEY);
@@ -1328,6 +1608,63 @@ export function WillItFitApp() {
       ctx.restore();
     }
 
+    if (showClearances) {
+      for (const item of furniture) {
+        const clearanceFt = item.clearanceFt ?? 0;
+
+        if (clearanceFt <= 0) {
+          continue;
+        }
+
+        const { width, depth } = getItemPixels(item, pixelsPerFoot);
+        const clearancePixels = clearanceFt * pixelsPerFoot;
+
+        ctx.save();
+        ctx.translate(item.x, item.y);
+        ctx.rotate((item.rotation * Math.PI) / 180);
+        drawRoundedRect(
+          ctx,
+          -width / 2 - clearancePixels,
+          -depth / 2 - clearancePixels,
+          width + clearancePixels * 2,
+          depth + clearancePixels * 2,
+          10,
+        );
+        ctx.fillStyle = clearanceConflictIds.has(item.id)
+          ? "rgba(195, 77, 54, 0.1)"
+          : "rgba(47, 96, 115, 0.08)";
+        ctx.strokeStyle = clearanceConflictIds.has(item.id)
+          ? "#c34d36"
+          : item.accent;
+        ctx.lineWidth = 2;
+        ctx.setLineDash([10, 7]);
+        ctx.fill();
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+
+    for (const measurement of measurements) {
+      ctx.save();
+      ctx.strokeStyle = "#2f6073";
+      ctx.fillStyle = "#20384f";
+      ctx.lineWidth = 4;
+      ctx.setLineDash([8, 6]);
+      ctx.beginPath();
+      ctx.moveTo(measurement.x1, measurement.y1);
+      ctx.lineTo(measurement.x2, measurement.y2);
+      ctx.stroke();
+      ctx.font = "700 18px Geist Mono, monospace";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(
+        measurement.label,
+        (measurement.x1 + measurement.x2) / 2,
+        (measurement.y1 + measurement.y2) / 2 - 14,
+      );
+      ctx.restore();
+    }
+
     for (const item of furniture) {
       const { width, depth } = getItemPixels(item, pixelsPerFoot);
       const isOverlapping = overlapIds.has(item.id);
@@ -1358,10 +1695,13 @@ export function WillItFitApp() {
   }, [
     backgroundImage,
     calibration.line,
+    clearanceConflictIds,
     furniture,
+    measurements,
     overlapIds,
     pixelsPerFoot,
     plan,
+    showClearances,
   ]);
 
   const exportPng = () => {
@@ -1399,7 +1739,14 @@ export function WillItFitApp() {
   };
 
   const exportJson = () => {
-    const payload: SavedLayout = { plan, calibration, furniture };
+    const payload: SavedLayout = {
+      plan,
+      calibration,
+      furniture,
+      measurements,
+      showClearances,
+      snapToGrid,
+    };
     const blob = new Blob([JSON.stringify(payload, null, 2)], {
       type: "application/json",
     });
@@ -1410,6 +1757,58 @@ export function WillItFitApp() {
     link.click();
     URL.revokeObjectURL(url);
     setStatus("Layout JSON exported");
+  };
+
+  const importJson = async (file: File | undefined) => {
+    if (!file) {
+      return;
+    }
+
+    try {
+      const imported = normalizeLayout(JSON.parse(await file.text()));
+      setPlan(imported.plan);
+      setCalibration(imported.calibration);
+      setFurniture(imported.furniture);
+      setMeasurements(imported.measurements ?? []);
+      setShowClearances(imported.showClearances ?? true);
+      setSnapToGrid(imported.snapToGrid ?? true);
+      setSelectedId(null);
+      setDraftLine(null);
+      setDraftMeasurement(null);
+      setShouldFitPlan(true);
+      setStatus("Layout JSON imported");
+    } catch {
+      setStatus("Could not import that JSON layout");
+    }
+  };
+
+  const handleImportInput = (event: ChangeEvent<HTMLInputElement>) => {
+    void importJson(event.target.files?.[0]);
+    event.target.value = "";
+  };
+
+  const copyFitSummary = async () => {
+    const lines = [
+      "Will It Fit? layout summary",
+      `Floor plan: ${plan?.fileName ?? "none"}`,
+      `Scale: ${
+        isCalibrated
+          ? `1 ft = ${pixelsPerFoot.toFixed(1)} px`
+          : "not calibrated"
+      }`,
+      `Furniture: ${furniture.length} item${furniture.length === 1 ? "" : "s"}`,
+      `Footprint: ${Math.round(totalFootprintSqFt)} sq ft`,
+      `Measurements: ${measurements.length}`,
+      `Overlaps: ${overlapIds.size}`,
+      `Clearance warnings: ${clearanceConflictIds.size}`,
+    ];
+
+    try {
+      await navigator.clipboard.writeText(lines.join("\n"));
+      setStatus("Fit summary copied");
+    } catch {
+      setStatus("Could not copy summary");
+    }
   };
 
   const stageBackgroundWidth = plan?.width ?? 1400;
@@ -1477,9 +1876,488 @@ export function WillItFitApp() {
         onChange={handleFileInput}
         type="file"
       />
+      <input
+        ref={importInputRef}
+        accept="application/json"
+        className="hidden"
+        onChange={handleImportInput}
+        type="file"
+      />
+
+      <section className="mx-auto mb-4 max-w-[1800px] lg:hidden">
+        <div className="paper-panel overflow-hidden rounded-[8px]">
+          <div className="grid grid-cols-4 gap-1 border-b border-[#1e2725]/10 bg-[#fbf7ee]/88 p-2">
+            <MobileTabButton
+              active={mobilePanel === "plan"}
+              icon={<Upload size={16} />}
+              label="Plan"
+              onClick={() => setMobilePanel("plan")}
+            />
+            <MobileTabButton
+              active={mobilePanel === "add"}
+              icon={<Plus size={16} />}
+              label="Add"
+              onClick={() => setMobilePanel("add")}
+            />
+            <MobileTabButton
+              active={mobilePanel === "edit"}
+              icon={<Move size={16} />}
+              label="Edit"
+              onClick={() => setMobilePanel("edit")}
+            />
+            <MobileTabButton
+              active={mobilePanel === "export"}
+              icon={<Save size={16} />}
+              label="Export"
+              onClick={() => setMobilePanel("export")}
+            />
+          </div>
+
+          <div className="max-h-[38svh] overflow-auto p-3">
+            {mobilePanel === "plan" ? (
+              <div className="space-y-3">
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    className="flex items-center justify-center gap-2 rounded-[6px] bg-[#223a54] px-3 py-3 text-sm font-semibold text-white transition hover:bg-[#2f6073]"
+                    onClick={() => fileInputRef.current?.click()}
+                    type="button"
+                  >
+                    <Upload size={16} />
+                    Upload
+                  </button>
+                  <button
+                    className="flex items-center justify-center gap-2 rounded-[6px] border border-[#223a54]/15 bg-white px-3 py-3 text-sm font-semibold text-[#223a54] transition hover:bg-[#f6efe3]"
+                    onClick={useSamplePlan}
+                    type="button"
+                  >
+                    <Home size={16} />
+                    Sample
+                  </button>
+                </div>
+
+                <div className="rounded-[8px] border border-[#223a54]/10 bg-white/70 p-3">
+                  <div className="flex items-center gap-2 text-sm font-bold text-[#1e2725]">
+                    <Lock size={15} />
+                    {plan ? plan.fileName : "No plan loaded"}
+                  </div>
+                  <div className="mt-1 font-mono text-xs text-[#66706d]">
+                    {plan
+                      ? `${plan.width} x ${plan.height}px locked background`
+                      : "PNG, JPG, and first-page PDF are supported."}
+                  </div>
+                  {uploadError ? (
+                    <p className="mt-2 text-sm font-semibold text-[#c34d36]">
+                      {uploadError}
+                    </p>
+                  ) : null}
+                </div>
+
+                <div className="rounded-[8px] border border-[#223a54]/10 bg-white/70 p-3">
+                  <button
+                    className={`flex w-full items-center justify-center gap-2 rounded-[6px] px-3 py-2.5 text-sm font-semibold transition ${
+                      tool === "calibrate"
+                        ? "bg-[#c34d36] text-white"
+                        : "bg-[#223a54] text-white hover:bg-[#2f6073]"
+                    }`}
+                    onClick={() => setTool("calibrate")}
+                    type="button"
+                  >
+                    <Ruler size={16} />
+                    Draw scale line
+                  </button>
+                  <div className="mt-3 grid grid-cols-2 gap-2">
+                    <NumberField
+                      label="Feet"
+                      onChange={setKnownFeet}
+                      value={knownFeet}
+                    />
+                    <NumberField
+                      label="Inches"
+                      onChange={setKnownInches}
+                      value={knownInches}
+                    />
+                  </div>
+                  <button
+                    className="mt-3 flex w-full items-center justify-center gap-2 rounded-[6px] border border-[#c34d36]/25 bg-[#fff4ed] px-3 py-2.5 text-sm font-semibold text-[#9b3f2b] transition hover:bg-[#ffe8db]"
+                    onClick={applyCalibration}
+                    type="button"
+                  >
+                    <Check size={16} />
+                    Apply scale
+                  </button>
+                  <div className="mt-3 rounded-[6px] bg-[#f7efe2] p-3 text-xs text-[#4b5653]">
+                    {isCalibrated
+                      ? `1 ft = ${pixelsPerFoot.toFixed(1)} px`
+                      : calibrationLength > 0
+                        ? `${Math.round(calibrationLength)} px line drawn`
+                        : "Draw across a known wall or doorway."}
+                  </div>
+                </div>
+              </div>
+            ) : null}
+
+            {mobilePanel === "add" ? (
+              <div className="space-y-3">
+                <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+                  {FURNITURE_LIBRARY.map((template) => (
+                    <button
+                      className="flex items-center justify-between gap-2 rounded-[6px] border border-[#223a54]/10 bg-white/75 px-3 py-2 text-left shadow-sm transition hover:border-[#2f6073]/30 hover:bg-[#f7efe2]"
+                      key={`mobile-${template.id}`}
+                      onClick={() => addFurniture(template)}
+                      type="button"
+                    >
+                      <span className="min-w-0">
+                        <span className="block truncate text-sm font-semibold text-[#1e2725]">
+                          {template.name}
+                        </span>
+                        <span className="font-mono text-[11px] text-[#66706d]">
+                          {formatDims(template.widthFt, template.depthFt)}
+                        </span>
+                      </span>
+                      <span
+                        className="h-5 w-5 shrink-0 rounded-[5px] border"
+                        style={{
+                          backgroundColor: template.color,
+                          borderColor: template.accent,
+                        }}
+                      />
+                    </button>
+                  ))}
+                </div>
+
+                <div className="rounded-[8px] border border-[#223a54]/10 bg-white/70 p-3">
+                  <div className="text-sm font-bold text-[#1e2725]">
+                    Custom furniture
+                  </div>
+                  <label className="mt-2 block text-xs font-bold uppercase tracking-[0.12em] text-[#68736f]">
+                    Name
+                    <input
+                      className="mt-1 h-10 w-full rounded-[6px] border border-[#223a54]/15 bg-white px-3 text-sm font-semibold text-[#1e2725] outline-none transition focus:border-[#2f6073]"
+                      onChange={(event) => setCustomName(event.target.value)}
+                      value={customName}
+                    />
+                  </label>
+                  <div className="mt-2 grid grid-cols-4 gap-2">
+                    <NumberField
+                      label="W ft"
+                      onChange={setCustomWidthFeet}
+                      value={customWidthFeet}
+                    />
+                    <NumberField
+                      label="W in"
+                      onChange={setCustomWidthInches}
+                      value={customWidthInches}
+                    />
+                    <NumberField
+                      label="D ft"
+                      onChange={setCustomDepthFeet}
+                      value={customDepthFeet}
+                    />
+                    <NumberField
+                      label="D in"
+                      onChange={setCustomDepthInches}
+                      value={customDepthInches}
+                    />
+                  </div>
+                  <button
+                    className="mt-3 flex w-full items-center justify-center gap-2 rounded-[6px] bg-[#2f6073] px-3 py-2.5 text-sm font-semibold text-white transition hover:bg-[#223a54]"
+                    onClick={addCustomFurniture}
+                    type="button"
+                  >
+                    <Plus size={16} />
+                    Add custom
+                  </button>
+                </div>
+              </div>
+            ) : null}
+
+            {mobilePanel === "edit" ? (
+              <div className="space-y-3">
+                {selectedItem ? (
+                  <>
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <div className="rounded-[8px] border border-[#223a54]/10 bg-white/70 p-3">
+                        <label className="block text-xs font-bold uppercase tracking-[0.12em] text-[#68736f]">
+                          Label
+                          <input
+                            className="mt-1 h-10 w-full rounded-[6px] border border-[#223a54]/15 bg-white px-3 text-sm font-semibold text-[#1e2725] outline-none transition focus:border-[#2f6073]"
+                            onChange={(event) =>
+                              updateSelected({ name: event.target.value })
+                            }
+                            value={selectedItem.name}
+                          />
+                        </label>
+                        <div className="mt-3 grid grid-cols-2 gap-2">
+                          <NumberField
+                            label="Width ft"
+                            onChange={(value) =>
+                              updateSelected({
+                                widthFt: Math.max(
+                                  MIN_FURNITURE_FEET,
+                                  Number.parseFloat(value) ||
+                                    selectedItem.widthFt,
+                                ),
+                              })
+                            }
+                            value={String(
+                              Number(selectedItem.widthFt.toFixed(2)),
+                            )}
+                          />
+                          <NumberField
+                            label="Depth ft"
+                            onChange={(value) =>
+                              updateSelected({
+                                depthFt: Math.max(
+                                  MIN_FURNITURE_FEET,
+                                  Number.parseFloat(value) ||
+                                    selectedItem.depthFt,
+                                ),
+                              })
+                            }
+                            value={String(
+                              Number(selectedItem.depthFt.toFixed(2)),
+                            )}
+                          />
+                        </div>
+                        <div className="mt-3 rounded-[6px] bg-[#f7efe2] p-3 font-mono text-xs font-semibold text-[#4b5653]">
+                          {formatDims(selectedItem.widthFt, selectedItem.depthFt)}
+                        </div>
+                      </div>
+
+                      <div className="rounded-[8px] border border-[#223a54]/10 bg-white/70 p-3">
+                        <div className="flex items-center justify-between gap-3 text-sm font-semibold text-[#1e2725]">
+                          Nudge
+                          <span className="font-mono text-xs text-[#66706d]">
+                            {snapToGrid ? "6 in" : "3 in"}
+                          </span>
+                        </div>
+                        <div className="mt-3 flex justify-center">
+                          <NudgePad onNudge={nudgeSelected} />
+                        </div>
+                        <div className="mt-3 grid grid-cols-2 gap-2">
+                          <button
+                            className="flex items-center justify-center gap-2 rounded-[6px] border border-[#223a54]/15 bg-white px-3 py-2.5 text-sm font-semibold text-[#223a54] transition hover:bg-[#f6efe3]"
+                            onClick={() => rotateSelected(-15)}
+                            type="button"
+                          >
+                            <RotateCcw size={16} />
+                            Rotate
+                          </button>
+                          <button
+                            className="flex items-center justify-center gap-2 rounded-[6px] border border-[#223a54]/15 bg-white px-3 py-2.5 text-sm font-semibold text-[#223a54] transition hover:bg-[#f6efe3]"
+                            onClick={() => rotateSelected(15)}
+                            type="button"
+                          >
+                            <RotateCw size={16} />
+                            Rotate
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <div className="rounded-[8px] border border-[#223a54]/10 bg-white/70 p-3">
+                        <div className="flex items-center justify-between gap-3 text-sm font-semibold text-[#1e2725]">
+                          Clearance buffer
+                          <span className="font-mono text-xs text-[#66706d]">
+                            {formatFeet(selectedItem.clearanceFt ?? 0)}
+                          </span>
+                        </div>
+                        <input
+                          className="mt-3 w-full accent-[#2f6073]"
+                          max={4}
+                          min={0}
+                          onChange={(event) =>
+                            updateSelected({
+                              clearanceFt:
+                                Number.parseFloat(event.target.value) || 0,
+                            })
+                          }
+                          step={0.5}
+                          type="range"
+                          value={selectedItem.clearanceFt ?? 0}
+                        />
+                        <div className="mt-3 grid grid-cols-4 gap-2">
+                          {[0, 1, 2, 3].map((clearance) => (
+                            <button
+                              className={`rounded-[6px] border px-2 py-2 text-xs font-bold transition ${
+                                (selectedItem.clearanceFt ?? 0) === clearance
+                                  ? "border-[#2f6073] bg-[#d8e7e4] text-[#20384f]"
+                                  : "border-[#223a54]/15 bg-white text-[#4b5653] hover:bg-[#f6efe3]"
+                              }`}
+                              key={`mobile-clearance-${clearance}`}
+                              onClick={() =>
+                                updateSelected({ clearanceFt: clearance })
+                              }
+                              type="button"
+                            >
+                              {clearance} ft
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div className="rounded-[8px] border border-[#223a54]/10 bg-white/70 p-3">
+                        <div className="flex items-center justify-between text-sm font-semibold text-[#1e2725]">
+                          Rotation
+                          <span className="font-mono text-[#66706d]">
+                            {Math.round(selectedItem.rotation)} deg
+                          </span>
+                        </div>
+                        <input
+                          className="mt-3 w-full accent-[#223a54]"
+                          max={359}
+                          min={0}
+                          onChange={(event) =>
+                            updateSelected({
+                              rotation:
+                                Number.parseFloat(event.target.value) || 0,
+                            })
+                          }
+                          type="range"
+                          value={selectedItem.rotation}
+                        />
+                        <div className="mt-3 grid grid-cols-2 gap-2">
+                          <button
+                            className="flex items-center justify-center gap-2 rounded-[6px] border border-[#223a54]/15 bg-white px-3 py-2.5 text-sm font-semibold text-[#223a54] transition hover:bg-[#f6efe3]"
+                            onClick={duplicateSelected}
+                            type="button"
+                          >
+                            <Copy size={16} />
+                            Duplicate
+                          </button>
+                          <button
+                            className="flex items-center justify-center gap-2 rounded-[6px] border border-[#c34d36]/25 bg-[#fff4ed] px-3 py-2.5 text-sm font-semibold text-[#9b3f2b] transition hover:bg-[#ffe8db]"
+                            onClick={deleteSelected}
+                            type="button"
+                          >
+                            <Trash2 size={16} />
+                            Delete
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  </>
+                ) : (
+                  <div className="rounded-[8px] border border-[#223a54]/10 bg-white/70 p-4 text-sm leading-6 text-[#55615d]">
+                    Add or tap a furniture object to edit it.
+                  </div>
+                )}
+
+                <div className="grid grid-cols-4 gap-2">
+                  <MetricTile label="Items" value={String(furniture.length)} />
+                  <MetricTile
+                    label="Sq ft"
+                    value={String(Math.round(totalFootprintSqFt))}
+                  />
+                  <MetricTile
+                    label="Marks"
+                    value={String(measurements.length)}
+                  />
+                  <MetricTile
+                    label="Issues"
+                    tone={layoutIssues > 0 ? "warn" : "ok"}
+                    value={String(layoutIssues)}
+                  />
+                </div>
+              </div>
+            ) : null}
+
+            {mobilePanel === "export" ? (
+              <div className="space-y-3">
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    className="flex items-center justify-center gap-2 rounded-[6px] bg-[#223a54] px-3 py-2.5 text-sm font-semibold text-white transition hover:bg-[#2f6073]"
+                    onClick={exportPng}
+                    type="button"
+                  >
+                    <Download size={16} />
+                    PNG
+                  </button>
+                  <button
+                    className="flex items-center justify-center gap-2 rounded-[6px] border border-[#223a54]/15 bg-white px-3 py-2.5 text-sm font-semibold text-[#223a54] transition hover:bg-[#f6efe3]"
+                    onClick={exportPdf}
+                    type="button"
+                  >
+                    <FileDown size={16} />
+                    PDF
+                  </button>
+                  <button
+                    className="flex items-center justify-center gap-2 rounded-[6px] border border-[#223a54]/15 bg-white px-3 py-2.5 text-sm font-semibold text-[#223a54] transition hover:bg-[#f6efe3]"
+                    onClick={exportJson}
+                    type="button"
+                  >
+                    <Save size={16} />
+                    Save JSON
+                  </button>
+                  <button
+                    className="flex items-center justify-center gap-2 rounded-[6px] border border-[#223a54]/15 bg-white px-3 py-2.5 text-sm font-semibold text-[#223a54] transition hover:bg-[#f6efe3]"
+                    onClick={() => importInputRef.current?.click()}
+                    type="button"
+                  >
+                    <FileUp size={16} />
+                    Import
+                  </button>
+                  <button
+                    className="flex items-center justify-center gap-2 rounded-[6px] border border-[#223a54]/15 bg-white px-3 py-2.5 text-sm font-semibold text-[#223a54] transition hover:bg-[#f6efe3]"
+                    onClick={copyFitSummary}
+                    type="button"
+                  >
+                    <Copy size={16} />
+                    Summary
+                  </button>
+                  <button
+                    className={`flex items-center justify-center gap-2 rounded-[6px] border px-3 py-2.5 text-sm font-semibold transition ${
+                      showClearances
+                        ? "border-[#2f6073]/25 bg-[#d8e7e4] text-[#20384f]"
+                        : "border-[#223a54]/15 bg-white text-[#223a54] hover:bg-[#f6efe3]"
+                    }`}
+                    onClick={() => setShowClearances((value) => !value)}
+                    type="button"
+                  >
+                    <AlertTriangle size={16} />
+                    Clearances
+                  </button>
+                </div>
+
+                <button
+                  className="flex w-full items-center justify-center gap-2 rounded-[6px] border border-[#c34d36]/25 bg-[#fff4ed] px-3 py-2.5 text-sm font-semibold text-[#9b3f2b] transition hover:bg-[#ffe8db]"
+                  onClick={() => {
+                    setMeasurements([]);
+                    setDraftMeasurement(null);
+                    setStatus("Measurements cleared");
+                  }}
+                  type="button"
+                >
+                  <Trash2 size={16} />
+                  Clear measurements
+                </button>
+
+                <div className="rounded-[8px] border border-[#223a54]/10 bg-[#f7efe2] p-3">
+                  <div className="flex items-start gap-2 text-xs font-semibold text-[#4b5653]">
+                    {status.includes("failed") || status.includes("full") ? (
+                      <AlertTriangle
+                        className="mt-0.5 text-[#c34d36]"
+                        size={15}
+                      />
+                    ) : (
+                      <Save className="mt-0.5 text-[#627a52]" size={15} />
+                    )}
+                    <span>{status}</span>
+                  </div>
+                  <div className="mt-2 font-mono text-xs text-[#66706d]">
+                    {furniture.length} object
+                    {furniture.length === 1 ? "" : "s"} on canvas
+                  </div>
+                </div>
+              </div>
+            ) : null}
+          </div>
+        </div>
+      </section>
 
       <section className="mx-auto grid max-w-[1800px] gap-4 lg:grid-cols-[310px_minmax(0,1fr)_310px]">
-        <aside className="paper-panel order-2 max-h-[calc(100svh-136px)] overflow-auto rounded-[8px] p-4 lg:order-1">
+        <aside className="paper-panel order-2 hidden max-h-[calc(100svh-136px)] overflow-auto rounded-[8px] p-4 lg:order-1 lg:block">
           <PanelTitle icon={<Upload size={17} />} title="Floor plan" />
           <div
             className="mt-3 rounded-[8px] border border-dashed border-[#223a54]/30 bg-white/60 p-3"
@@ -1661,7 +2539,7 @@ export function WillItFitApp() {
         </aside>
 
         <section className="order-1 min-w-0 lg:order-2">
-          <div className="paper-panel flex min-h-[calc(100svh-136px)] flex-col overflow-hidden rounded-[8px]">
+          <div className="paper-panel flex min-h-[560px] flex-col overflow-hidden rounded-[8px] lg:min-h-[calc(100svh-136px)]">
             <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#1e2725]/10 bg-[#fbf7ee]/88 px-3 py-3">
               <div className="flex flex-wrap items-center gap-2">
                 <ToolButton
@@ -1682,7 +2560,19 @@ export function WillItFitApp() {
                   label="Scale"
                   onClick={() => setTool("calibrate")}
                 />
+                <ToolButton
+                  active={tool === "measure"}
+                  icon={<Ruler size={16} />}
+                  label="Measure"
+                  onClick={() => setTool("measure")}
+                />
                 <div className="mx-1 h-7 w-px bg-[#1e2725]/10" />
+                <ToolButton
+                  active={snapToGrid}
+                  icon={<Magnet size={16} />}
+                  label="Snap"
+                  onClick={() => setSnapToGrid((value) => !value)}
+                />
                 <IconButton
                   icon={<ZoomOut size={16} />}
                   label="Zoom out"
@@ -1714,7 +2604,7 @@ export function WillItFitApp() {
 
             <div
               ref={canvasShellRef}
-              className="canvas-grid relative min-h-[560px] flex-1 overflow-hidden"
+              className="canvas-grid relative min-h-[460px] flex-1 overflow-hidden sm:min-h-[520px] lg:min-h-[560px]"
               onDragOver={(event) => event.preventDefault()}
               onDrop={handleCanvasDrop}
             >
@@ -1817,10 +2707,83 @@ export function WillItFitApp() {
                     </>
                   ) : null}
 
+                  {showClearances
+                    ? furniture.map((item) => {
+                        const clearanceFt = item.clearanceFt ?? 0;
+
+                        if (clearanceFt <= 0) {
+                          return null;
+                        }
+
+                        const { width, depth } = getItemPixels(
+                          item,
+                          pixelsPerFoot,
+                        );
+                        const clearancePixels = clearanceFt * pixelsPerFoot;
+                        const hasIssue = clearanceConflictIds.has(item.id);
+
+                        return (
+                          <Group
+                            key={`${item.id}-clearance`}
+                            listening={false}
+                            rotation={item.rotation}
+                            x={item.x}
+                            y={item.y}
+                          >
+                            <Rect
+                              cornerRadius={9}
+                              dash={[10 / stageScale, 7 / stageScale]}
+                              fill={
+                                hasIssue
+                                  ? "rgba(195, 77, 54, 0.1)"
+                                  : "rgba(47, 96, 115, 0.08)"
+                              }
+                              height={depth + clearancePixels * 2}
+                              offsetX={width / 2 + clearancePixels}
+                              offsetY={depth / 2 + clearancePixels}
+                              stroke={hasIssue ? "#c34d36" : item.accent}
+                              strokeWidth={2 / stageScale}
+                              width={width + clearancePixels * 2}
+                            />
+                          </Group>
+                        );
+                      })
+                    : null}
+
+                  {visibleMeasurements.map((measurement) => (
+                    <Group key={measurement.id} listening={false}>
+                      <Line
+                        dash={[8 / stageScale, 6 / stageScale]}
+                        lineCap="round"
+                        points={[
+                          measurement.x1,
+                          measurement.y1,
+                          measurement.x2,
+                          measurement.y2,
+                        ]}
+                        stroke="#2f6073"
+                        strokeWidth={4 / stageScale}
+                      />
+                      <Text
+                        align="center"
+                        fill="#20384f"
+                        fontFamily="Geist Mono, monospace"
+                        fontSize={13 / stageScale}
+                        fontStyle="700"
+                        offsetX={42 / stageScale}
+                        text={measurement.label}
+                        width={84 / stageScale}
+                        x={(measurement.x1 + measurement.x2) / 2}
+                        y={(measurement.y1 + measurement.y2) / 2 - 20 / stageScale}
+                      />
+                    </Group>
+                  ))}
+
                   {furniture.map((item) => {
                     const { width, depth } = getItemPixels(item, pixelsPerFoot);
                     const isSelected = item.id === selectedId;
                     const isOverlapping = overlapIds.has(item.id);
+                    const isClearanceIssue = clearanceConflictIds.has(item.id);
                     const fontSize = clamp(Math.min(width, depth) / 5, 10, 18);
 
                     return (
@@ -1831,6 +2794,7 @@ export function WillItFitApp() {
                           event.cancelBubble = true;
                           setSelectedId(item.id);
                           setTool("move");
+                          setMobilePanel("edit");
                         }}
                         onDragStart={(event) => {
                           event.cancelBubble = true;
@@ -1840,10 +2804,19 @@ export function WillItFitApp() {
                           event.cancelBubble = true;
                           interactionRef.current = false;
                           const node = event.target;
+                          const nextPosition = snapPoint({
+                            x: node.x(),
+                            y: node.y(),
+                          });
+                          node.position(nextPosition);
                           setFurniture((items) =>
                             items.map((piece) =>
                               piece.id === item.id
-                                ? { ...piece, x: node.x(), y: node.y() }
+                                ? {
+                                    ...piece,
+                                    x: nextPosition.x,
+                                    y: nextPosition.y,
+                                  }
                                 : piece,
                             ),
                           );
@@ -1852,6 +2825,7 @@ export function WillItFitApp() {
                           event.cancelBubble = true;
                           setSelectedId(item.id);
                           setTool("move");
+                          setMobilePanel("edit");
                         }}
                         onTransformEnd={(event) => {
                           const node = event.target as Konva.Group;
@@ -1896,8 +2870,16 @@ export function WillItFitApp() {
                           opacity={0.95}
                           shadowBlur={isSelected ? 10 : 0}
                           shadowColor="rgba(34, 58, 84, 0.25)"
-                          stroke={isOverlapping ? "#c34d36" : item.accent}
-                          strokeWidth={isOverlapping ? 4 / stageScale : 2 / stageScale}
+                          stroke={
+                            isOverlapping || isClearanceIssue
+                              ? "#c34d36"
+                              : item.accent
+                          }
+                          strokeWidth={
+                            isOverlapping || isClearanceIssue
+                              ? 4 / stageScale
+                              : 2 / stageScale
+                          }
                           width={width}
                         />
                         <Text
@@ -1985,7 +2967,7 @@ export function WillItFitApp() {
           </div>
         </section>
 
-        <aside className="paper-panel order-3 max-h-[calc(100svh-136px)] overflow-auto rounded-[8px] p-4">
+        <aside className="paper-panel order-3 hidden max-h-[calc(100svh-136px)] overflow-auto rounded-[8px] p-4 lg:block">
           <PanelTitle icon={<Move size={17} />} title="Selection" />
           {selectedItem ? (
             <div className="mt-3 space-y-4">
@@ -2029,6 +3011,56 @@ export function WillItFitApp() {
                 <div className="mt-3 rounded-[6px] bg-[#f7efe2] p-3 font-mono text-xs font-semibold text-[#4b5653]">
                   {formatDims(selectedItem.widthFt, selectedItem.depthFt)}
                 </div>
+              </div>
+
+              <div className="rounded-[8px] border border-[#223a54]/10 bg-white/70 p-3">
+                <div className="flex items-center justify-between gap-3 text-sm font-semibold text-[#1e2725]">
+                  Nudge
+                  <span className="font-mono text-xs text-[#66706d]">
+                    {snapToGrid ? "6 in" : "3 in"}
+                  </span>
+                </div>
+                <div className="mt-3 flex justify-center">
+                  <NudgePad onNudge={nudgeSelected} />
+                </div>
+              </div>
+
+              <div className="rounded-[8px] border border-[#223a54]/10 bg-white/70 p-3">
+                <div className="flex items-center justify-between gap-3 text-sm font-semibold text-[#1e2725]">
+                  Clearance buffer
+                  <span className="font-mono text-xs text-[#66706d]">
+                    {formatFeet(selectedItem.clearanceFt ?? 0)}
+                  </span>
+                </div>
+                <div className="mt-3 grid grid-cols-4 gap-2">
+                  {[0, 1, 2, 3].map((clearance) => (
+                    <button
+                      className={`rounded-[6px] border px-2 py-2 text-xs font-bold transition ${
+                        (selectedItem.clearanceFt ?? 0) === clearance
+                          ? "border-[#2f6073] bg-[#d8e7e4] text-[#20384f]"
+                          : "border-[#223a54]/15 bg-white text-[#4b5653] hover:bg-[#f6efe3]"
+                      }`}
+                      key={clearance}
+                      onClick={() => updateSelected({ clearanceFt: clearance })}
+                      type="button"
+                    >
+                      {clearance} ft
+                    </button>
+                  ))}
+                </div>
+                <input
+                  className="mt-3 w-full accent-[#2f6073]"
+                  max={4}
+                  min={0}
+                  onChange={(event) =>
+                    updateSelected({
+                      clearanceFt: Number.parseFloat(event.target.value) || 0,
+                    })
+                  }
+                  step={0.5}
+                  type="range"
+                  value={selectedItem.clearanceFt ?? 0}
+                />
               </div>
 
               <div className="grid grid-cols-2 gap-2">
@@ -2096,7 +3128,24 @@ export function WillItFitApp() {
 
           <div className="mt-5">
             <PanelTitle icon={<AlertTriangle size={17} />} title="Fit check" />
-            <div className="mt-3 rounded-[8px] border border-[#223a54]/10 bg-white/70 p-3">
+            <div className="mt-3 space-y-3 rounded-[8px] border border-[#223a54]/10 bg-white/70 p-3">
+              <div className="grid grid-cols-2 gap-2">
+                <MetricTile label="Items" value={String(furniture.length)} />
+                <MetricTile
+                  label="Footprint"
+                  value={`${Math.round(totalFootprintSqFt)} sq ft`}
+                />
+                <MetricTile
+                  label="Measurements"
+                  value={String(measurements.length)}
+                />
+                <MetricTile
+                  label="Issues"
+                  tone={layoutIssues > 0 ? "warn" : "ok"}
+                  value={String(layoutIssues)}
+                />
+              </div>
+
               {overlapIds.size > 0 ? (
                 <div className="flex gap-3 text-sm text-[#9b3f2b]">
                   <AlertTriangle className="mt-0.5 shrink-0" size={17} />
@@ -2111,16 +3160,38 @@ export function WillItFitApp() {
                     </p>
                   </div>
                 </div>
-              ) : (
+              ) : null}
+
+              {clearanceConflictIds.size > 0 ? (
+                <div className="flex gap-3 text-sm text-[#9b3f2b]">
+                  <AlertTriangle className="mt-0.5 shrink-0" size={17} />
+                  <div>
+                    <div className="font-bold">
+                      {clearanceConflictIds.size} clearance warning
+                      {clearanceConflictIds.size === 1 ? "" : "s"}
+                    </div>
+                    <p className="mt-1 text-xs leading-5 text-[#7b4c41]">
+                      Dashed halos show requested walking or delivery clearance.
+                    </p>
+                  </div>
+                </div>
+              ) : null}
+
+              {layoutIssues === 0 ? (
                 <div className="flex gap-3 text-sm text-[#4f6847]">
                   <Check className="mt-0.5 shrink-0" size={17} />
                   <div>
-                    <div className="font-bold">No furniture overlaps</div>
+                    <div className="font-bold">No fit warnings</div>
                     <p className="mt-1 text-xs leading-5 text-[#60715c]">
                       This is a visual fit check, not wall detection.
                     </p>
                   </div>
                 </div>
+              ) : (
+                <p className="text-xs leading-5 text-[#7b4c41]">
+                  Red outlines mean something needs attention before you trust
+                  the layout.
+                </p>
               )}
             </div>
           </div>
@@ -2151,6 +3222,46 @@ export function WillItFitApp() {
               >
                 <Save size={16} />
                 Save JSON
+              </button>
+              <button
+                className="flex items-center justify-center gap-2 rounded-[6px] border border-[#223a54]/15 bg-white px-3 py-2.5 text-sm font-semibold text-[#223a54] transition hover:bg-[#f6efe3]"
+                onClick={() => importInputRef.current?.click()}
+                type="button"
+              >
+                <FileUp size={16} />
+                Import JSON
+              </button>
+              <button
+                className="flex items-center justify-center gap-2 rounded-[6px] border border-[#223a54]/15 bg-white px-3 py-2.5 text-sm font-semibold text-[#223a54] transition hover:bg-[#f6efe3]"
+                onClick={copyFitSummary}
+                type="button"
+              >
+                <Copy size={16} />
+                Copy summary
+              </button>
+              <button
+                className={`flex items-center justify-center gap-2 rounded-[6px] border px-3 py-2.5 text-sm font-semibold transition ${
+                  showClearances
+                    ? "border-[#2f6073]/25 bg-[#d8e7e4] text-[#20384f]"
+                    : "border-[#223a54]/15 bg-white text-[#223a54] hover:bg-[#f6efe3]"
+                }`}
+                onClick={() => setShowClearances((value) => !value)}
+                type="button"
+              >
+                <AlertTriangle size={16} />
+                {showClearances ? "Hide clearances" : "Show clearances"}
+              </button>
+              <button
+                className="flex items-center justify-center gap-2 rounded-[6px] border border-[#c34d36]/25 bg-[#fff4ed] px-3 py-2.5 text-sm font-semibold text-[#9b3f2b] transition hover:bg-[#ffe8db]"
+                onClick={() => {
+                  setMeasurements([]);
+                  setDraftMeasurement(null);
+                  setStatus("Measurements cleared");
+                }}
+                type="button"
+              >
+                <Trash2 size={16} />
+                Clear measurements
               </button>
             </div>
           </div>
@@ -2260,5 +3371,115 @@ function IconButton({
     >
       {icon}
     </button>
+  );
+}
+
+function MetricTile({
+  label,
+  value,
+  tone = "neutral",
+}: {
+  label: string;
+  value: string;
+  tone?: "neutral" | "ok" | "warn";
+}) {
+  const toneClass =
+    tone === "warn"
+      ? "bg-[#fff4ed] text-[#9b3f2b]"
+      : tone === "ok"
+        ? "bg-[#eef5ea] text-[#4f6847]"
+        : "bg-[#f7efe2] text-[#4b5653]";
+
+  return (
+    <div className={`rounded-[6px] p-2 ${toneClass}`}>
+      <div className="text-[10px] font-extrabold uppercase tracking-[0.14em] opacity-80">
+        {label}
+      </div>
+      <div className="mt-1 font-mono text-sm font-bold">{value}</div>
+    </div>
+  );
+}
+
+function MobileTabButton({
+  active,
+  icon,
+  label,
+  onClick,
+}: {
+  active: boolean;
+  icon: React.ReactNode;
+  label: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      className={`flex h-11 items-center justify-center gap-1.5 rounded-[6px] px-2 text-sm font-bold transition ${
+        active
+          ? "bg-[#223a54] text-white shadow-sm"
+          : "border border-[#223a54]/15 bg-white text-[#223a54] hover:bg-[#f6efe3]"
+      }`}
+      onClick={onClick}
+      type="button"
+    >
+      {icon}
+      <span>{label}</span>
+    </button>
+  );
+}
+
+function NudgePad({
+  onNudge,
+}: {
+  onNudge: (direction: NudgeDirection) => void;
+}) {
+  const buttonClass =
+    "flex h-11 w-11 items-center justify-center rounded-[6px] border border-[#223a54]/15 bg-white text-[#223a54] transition hover:bg-[#f6efe3]";
+
+  return (
+    <div className="grid w-[140px] grid-cols-3 gap-1">
+      <span aria-hidden />
+      <button
+        aria-label="Nudge up"
+        className={buttonClass}
+        onClick={() => onNudge("up")}
+        title="Nudge up"
+        type="button"
+      >
+        <ArrowUp size={16} />
+      </button>
+      <span aria-hidden />
+      <button
+        aria-label="Nudge left"
+        className={buttonClass}
+        onClick={() => onNudge("left")}
+        title="Nudge left"
+        type="button"
+      >
+        <ArrowLeft size={16} />
+      </button>
+      <div className="flex h-11 w-11 items-center justify-center rounded-[6px] bg-[#f7efe2] font-mono text-[10px] font-bold uppercase tracking-[0.12em] text-[#66706d]">
+        Move
+      </div>
+      <button
+        aria-label="Nudge right"
+        className={buttonClass}
+        onClick={() => onNudge("right")}
+        title="Nudge right"
+        type="button"
+      >
+        <ArrowRight size={16} />
+      </button>
+      <span aria-hidden />
+      <button
+        aria-label="Nudge down"
+        className={buttonClass}
+        onClick={() => onNudge("down")}
+        title="Nudge down"
+        type="button"
+      >
+        <ArrowDown size={16} />
+      </button>
+      <span aria-hidden />
+    </div>
   );
 }
