@@ -28,6 +28,7 @@ import {
   ArrowRight,
   ArrowUp,
   Check,
+  ClipboardPaste,
   Copy,
   Download,
   FileDown,
@@ -57,6 +58,17 @@ const MIN_FURNITURE_FEET = 0.5;
 type ToolMode = "move" | "pan" | "calibrate" | "measure";
 type MobilePanel = "plan" | "add" | "edit" | "export";
 type NudgeDirection = "up" | "down" | "left" | "right";
+type FurnitureSymbol =
+  | "bed"
+  | "crib"
+  | "sofa"
+  | "sectional"
+  | "dining"
+  | "desk"
+  | "dresser"
+  | "nightstand"
+  | "coffee"
+  | "generic";
 
 type PlanImage = {
   src: string;
@@ -537,6 +549,298 @@ function drawRoundedRect(
   ctx.closePath();
 }
 
+function getFurnitureSymbol(item: Pick<FurnitureItem, "id" | "name">): FurnitureSymbol {
+  const text = `${item.id} ${item.name}`.toLowerCase();
+
+  if (text.includes("crib")) {
+    return "crib";
+  }
+
+  if (text.includes("bed")) {
+    return "bed";
+  }
+
+  if (text.includes("sectional")) {
+    return "sectional";
+  }
+
+  if (text.includes("sofa")) {
+    return "sofa";
+  }
+
+  if (text.includes("dining")) {
+    return "dining";
+  }
+
+  if (text.includes("desk")) {
+    return "desk";
+  }
+
+  if (text.includes("dresser")) {
+    return "dresser";
+  }
+
+  if (text.includes("nightstand")) {
+    return "nightstand";
+  }
+
+  if (text.includes("coffee")) {
+    return "coffee";
+  }
+
+  return "generic";
+}
+
+function drawCanvasDetailRect(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  radius: number,
+  fillStyle?: string,
+) {
+  drawRoundedRect(ctx, x, y, width, height, radius);
+
+  if (fillStyle) {
+    ctx.fillStyle = fillStyle;
+    ctx.fill();
+  }
+
+  ctx.stroke();
+}
+
+function drawCanvasFurnitureDetails(
+  ctx: CanvasRenderingContext2D,
+  symbol: FurnitureSymbol,
+  width: number,
+  depth: number,
+  accent: string,
+) {
+  const lineWidth = clamp(Math.min(width, depth) / 36, 1.5, 4);
+  const pad = Math.max(5, Math.min(width, depth) * 0.1);
+  const left = -width / 2;
+  const top = -depth / 2;
+  const right = width / 2;
+  const bottom = depth / 2;
+  const detailFill = "rgba(255, 255, 255, 0.28)";
+
+  ctx.save();
+  ctx.strokeStyle = accent;
+  ctx.lineWidth = lineWidth;
+  ctx.setLineDash([]);
+
+  if (symbol === "bed") {
+    const pillowCount = width > 70 ? 2 : 1;
+    const pillowGap = Math.max(4, width * 0.04);
+    const pillowHeight = clamp(depth * 0.18, 10, 26);
+    const pillowWidth =
+      (width - pad * 2 - pillowGap * (pillowCount - 1)) / pillowCount;
+
+    for (let index = 0; index < pillowCount; index += 1) {
+      drawCanvasDetailRect(
+        ctx,
+        left + pad + index * (pillowWidth + pillowGap),
+        top + pad,
+        pillowWidth,
+        pillowHeight,
+        5,
+        detailFill,
+      );
+    }
+
+    const blanketY = top + pad + pillowHeight + pad * 0.75;
+    ctx.beginPath();
+    ctx.moveTo(left + pad, blanketY);
+    ctx.lineTo(right - pad, blanketY);
+    ctx.moveTo(0, blanketY);
+    ctx.lineTo(0, bottom - pad);
+    ctx.stroke();
+  } else if (symbol === "crib") {
+    const railGap = Math.max(8, width / 5);
+    ctx.beginPath();
+    ctx.rect(left + pad, top + pad, width - pad * 2, depth - pad * 2);
+    for (let x = left + pad + railGap; x < right - pad; x += railGap) {
+      ctx.moveTo(x, top + pad);
+      ctx.lineTo(x, bottom - pad);
+    }
+    ctx.stroke();
+  } else if (symbol === "sofa" || symbol === "sectional") {
+    const arm = clamp(depth * 0.18, 8, 22);
+    drawCanvasDetailRect(
+      ctx,
+      left + pad,
+      top + pad,
+      width - pad * 2,
+      depth - pad * 2,
+      6,
+      undefined,
+    );
+    ctx.beginPath();
+    ctx.moveTo(left + pad, top + pad + arm);
+    ctx.lineTo(right - pad, top + pad + arm);
+    ctx.moveTo(left + width / 3, top + pad + arm);
+    ctx.lineTo(left + width / 3, bottom - pad);
+    ctx.moveTo(left + (width / 3) * 2, top + pad + arm);
+    ctx.lineTo(left + (width / 3) * 2, bottom - pad);
+
+    if (symbol === "sectional") {
+      ctx.moveTo(left + width * 0.58, top + depth * 0.08);
+      ctx.lineTo(left + width * 0.58, bottom - pad);
+      ctx.moveTo(left + width * 0.58, top + depth * 0.54);
+      ctx.lineTo(right - pad, top + depth * 0.54);
+    }
+
+    ctx.stroke();
+  } else if (symbol === "dining") {
+    const tableWidth = width * 0.55;
+    const tableDepth = depth * 0.42;
+    drawCanvasDetailRect(
+      ctx,
+      -tableWidth / 2,
+      -tableDepth / 2,
+      tableWidth,
+      tableDepth,
+      8,
+      detailFill,
+    );
+
+    const chairWidth = clamp(width * 0.13, 9, 22);
+    const chairDepth = clamp(depth * 0.16, 8, 18);
+    const sideChairWidth = clamp(width * 0.1, 8, 18);
+    const sideChairDepth = clamp(depth * 0.26, 10, 24);
+    const chairY = top + pad;
+    const bottomChairY = bottom - pad - chairDepth;
+
+    for (const x of [-width * 0.22, width * 0.22]) {
+      drawCanvasDetailRect(ctx, x - chairWidth / 2, chairY, chairWidth, chairDepth, 4);
+      drawCanvasDetailRect(
+        ctx,
+        x - chairWidth / 2,
+        bottomChairY,
+        chairWidth,
+        chairDepth,
+        4,
+      );
+    }
+
+    drawCanvasDetailRect(
+      ctx,
+      left + pad,
+      -sideChairDepth / 2,
+      sideChairWidth,
+      sideChairDepth,
+      4,
+    );
+    drawCanvasDetailRect(
+      ctx,
+      right - pad - sideChairWidth,
+      -sideChairDepth / 2,
+      sideChairWidth,
+      sideChairDepth,
+      4,
+    );
+  } else if (symbol === "desk") {
+    const deskDepth = depth * 0.42;
+    drawCanvasDetailRect(
+      ctx,
+      left + pad,
+      top + pad,
+      width - pad * 2,
+      deskDepth,
+      5,
+      detailFill,
+    );
+    ctx.beginPath();
+    ctx.moveTo(left + pad + width * 0.22, top + pad);
+    ctx.lineTo(left + pad + width * 0.22, top + pad + deskDepth);
+    ctx.moveTo(right - pad - width * 0.22, top + pad);
+    ctx.lineTo(right - pad - width * 0.22, top + pad + deskDepth);
+    ctx.stroke();
+    drawCanvasDetailRect(
+      ctx,
+      -width * 0.18,
+      bottom - pad - depth * 0.22,
+      width * 0.36,
+      depth * 0.18,
+      5,
+    );
+  } else if (symbol === "dresser" || symbol === "nightstand") {
+    const rows = symbol === "dresser" ? 3 : 2;
+    drawCanvasDetailRect(
+      ctx,
+      left + pad,
+      top + pad,
+      width - pad * 2,
+      depth - pad * 2,
+      5,
+      undefined,
+    );
+    ctx.beginPath();
+    for (let row = 1; row < rows; row += 1) {
+      const y = top + pad + ((depth - pad * 2) / rows) * row;
+      ctx.moveTo(left + pad, y);
+      ctx.lineTo(right - pad, y);
+    }
+    ctx.stroke();
+    for (let row = 0; row < rows; row += 1) {
+      const y = top + pad + ((depth - pad * 2) / rows) * (row + 0.5);
+      ctx.beginPath();
+      ctx.moveTo(-width * 0.08, y);
+      ctx.lineTo(width * 0.08, y);
+      ctx.stroke();
+    }
+  } else if (symbol === "coffee") {
+    drawCanvasDetailRect(
+      ctx,
+      left + pad,
+      top + pad,
+      width - pad * 2,
+      depth - pad * 2,
+      10,
+      detailFill,
+    );
+    ctx.beginPath();
+    ctx.moveTo(left + pad * 1.5, -depth * 0.12);
+    ctx.lineTo(right - pad * 1.5, -depth * 0.12);
+    ctx.moveTo(left + pad * 1.5, depth * 0.12);
+    ctx.lineTo(right - pad * 1.5, depth * 0.12);
+    ctx.stroke();
+  } else {
+    drawCanvasDetailRect(
+      ctx,
+      left + pad,
+      top + pad,
+      width - pad * 2,
+      depth - pad * 2,
+      5,
+      undefined,
+    );
+    ctx.beginPath();
+    ctx.moveTo(left + pad, top + pad);
+    ctx.lineTo(right - pad, bottom - pad);
+    ctx.moveTo(right - pad, top + pad);
+    ctx.lineTo(left + pad, bottom - pad);
+    ctx.stroke();
+  }
+
+  ctx.restore();
+}
+
+function makeFurnitureCopy(
+  source: FurnitureItem,
+  position: Point,
+  name = source.name.endsWith(" copy") ? source.name : `${source.name} copy`,
+): FurnitureItem {
+  return {
+    ...source,
+    id: createId("paste"),
+    name,
+    x: position.x,
+    y: position.y,
+  };
+}
+
 function normalizeFurniture(items: FurnitureItem[] | undefined) {
   return (items ?? []).map((item) => ({
     ...item,
@@ -563,6 +867,9 @@ export function WillItFitApp() {
     useState<Calibration>(initialCalibration);
   const [furniture, setFurniture] = useState<FurnitureItem[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [copiedFurniture, setCopiedFurniture] = useState<FurnitureItem | null>(
+    null,
+  );
   const [tool, setTool] = useState<ToolMode>("move");
   const [stageSize, setStageSize] = useState({ width: 900, height: 620 });
   const [stageScale, setStageScale] = useState(1);
@@ -721,6 +1028,7 @@ export function WillItFitApp() {
           setPlan(parsed.plan);
           setCalibration(parsed.calibration);
           setFurniture(parsed.furniture);
+          setCopiedFurniture(null);
           setMeasurements(parsed.measurements ?? []);
           setShowClearances(parsed.showClearances ?? true);
           setSnapToGrid(parsed.snapToGrid ?? true);
@@ -978,9 +1286,10 @@ export function WillItFitApp() {
 
   const addFurniture = useCallback(
     (template: FurnitureTemplate, position?: { x: number; y: number }) => {
+      const cascadeOffset = position ? 0 : ((furniture.length % 6) * 24) / stageScale;
       const fallback = snapPoint({
-        x: (stageSize.width / 2 - stagePosition.x) / stageScale,
-        y: (stageSize.height / 2 - stagePosition.y) / stageScale,
+        x: (stageSize.width / 2 - stagePosition.x) / stageScale + cascadeOffset,
+        y: (stageSize.height / 2 - stagePosition.y) / stageScale + cascadeOffset,
       });
       const nextPosition = snapPoint(position ?? fallback);
       const nextItem: FurnitureItem = {
@@ -1002,6 +1311,7 @@ export function WillItFitApp() {
       setMobilePanel("edit");
     },
     [
+      furniture.length,
       snapPoint,
       stagePosition.x,
       stagePosition.y,
@@ -1086,21 +1396,55 @@ export function WillItFitApp() {
     );
   };
 
+  const copySelected = () => {
+    if (!selectedItem) {
+      setStatus("Select furniture to copy");
+      return;
+    }
+
+    setCopiedFurniture(selectedItem);
+    setStatus(`${selectedItem.name} copied`);
+  };
+
+  const pasteFurniture = () => {
+    if (!copiedFurniture) {
+      setStatus("Copy a furniture item first");
+      return;
+    }
+
+    const offset = 26 / stageScale;
+    const base = selectedItem ?? copiedFurniture;
+    const nextPosition = snapPoint({
+      x: base.x + offset,
+      y: base.y + offset,
+    });
+    const copyItem = makeFurnitureCopy(copiedFurniture, nextPosition);
+
+    setFurniture((items) => [...items, copyItem]);
+    setSelectedId(copyItem.id);
+    setMobilePanel("edit");
+    setStatus(`${copyItem.name} pasted`);
+  };
+
   const duplicateSelected = () => {
     if (!selectedItem) {
       return;
     }
 
-    const copyItem: FurnitureItem = {
-      ...selectedItem,
-      id: createId("copy"),
-      x: selectedItem.x + 18 / stageScale,
-      y: selectedItem.y + 18 / stageScale,
-      name: `${selectedItem.name} copy`,
-    };
+    const offset = 26 / stageScale;
+    const copyItem = makeFurnitureCopy(
+      selectedItem,
+      snapPoint({
+        x: selectedItem.x + offset,
+        y: selectedItem.y + offset,
+      }),
+    );
 
     setFurniture((items) => [...items, copyItem]);
     setSelectedId(copyItem.id);
+    setCopiedFurniture(selectedItem);
+    setMobilePanel("edit");
+    setStatus(`${copyItem.name} duplicated`);
   };
 
   const deleteSelected = () => {
@@ -1116,9 +1460,22 @@ export function WillItFitApp() {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (
         event.target instanceof HTMLInputElement ||
-        event.target instanceof HTMLTextAreaElement
+        event.target instanceof HTMLTextAreaElement ||
+        (event.target instanceof HTMLElement && event.target.isContentEditable)
       ) {
         return;
+      }
+
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "c") {
+        if (selectedId) {
+          event.preventDefault();
+          copySelected();
+        }
+      }
+
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "v") {
+        event.preventDefault();
+        pasteFurniture();
       }
 
       if (event.key === "Backspace" || event.key === "Delete") {
@@ -1233,6 +1590,7 @@ export function WillItFitApp() {
         setPlan(nextPlan);
         setBackgroundImage(null);
         setSelectedId(null);
+        setCopiedFurniture(null);
         setShouldFitPlan(true);
         setStatus("Floor plan ready");
       } catch (error) {
@@ -1543,6 +1901,7 @@ export function WillItFitApp() {
     setMeasurements([]);
     setDraftMeasurement(null);
     setSelectedId(null);
+    setCopiedFurniture(null);
     setShouldFitPlan(true);
     setStatus("Sample floor plan loaded");
   };
@@ -1560,6 +1919,7 @@ export function WillItFitApp() {
     setFurniture([]);
     setMeasurements([]);
     setSelectedId(null);
+    setCopiedFurniture(null);
     setDraftLine(null);
     setDraftMeasurement(null);
     setStageScale(1);
@@ -1676,27 +2036,41 @@ export function WillItFitApp() {
 
     for (const item of furniture) {
       const { width, depth } = getItemPixels(item, pixelsPerFoot);
-      const isOverlapping = overlapIds.has(item.id);
+      const hasIssue =
+        overlapIds.has(item.id) || clearanceConflictIds.has(item.id);
+      const strokeColor = hasIssue ? "#c34d36" : item.accent;
 
       ctx.save();
       ctx.translate(item.x, item.y);
       ctx.rotate((item.rotation * Math.PI) / 180);
       drawRoundedRect(ctx, -width / 2, -depth / 2, width, depth, 8);
       ctx.fillStyle = item.color;
-      ctx.strokeStyle = isOverlapping ? "#c34d36" : item.accent;
-      ctx.lineWidth = isOverlapping ? 6 : 3;
+      ctx.strokeStyle = strokeColor;
+      ctx.lineWidth = hasIssue ? 6 : 3;
       ctx.fill();
       ctx.stroke();
+      drawCanvasFurnitureDetails(
+        ctx,
+        getFurnitureSymbol(item),
+        width,
+        depth,
+        strokeColor,
+      );
 
       ctx.fillStyle = "#1e2725";
-      const fontSize = clamp(Math.min(width, depth) / 5, 11, 22);
+      const fontSize = clamp(Math.min(width, depth) / 6, 10, 18);
       ctx.font = `700 ${fontSize}px Geist, system-ui, sans-serif`;
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
       const label = fitCanvasText(ctx, item.name, width - 18);
-      ctx.fillText(label, 0, -fontSize * 0.35);
-      ctx.font = `600 ${Math.max(10, fontSize * 0.72)}px Geist Mono, monospace`;
-      ctx.fillText(formatDims(item.widthFt, item.depthFt), 0, fontSize * 0.95);
+      const labelY = depth / 2 - Math.max(18, fontSize * 2.2);
+      ctx.fillText(label, 0, labelY);
+      ctx.font = `600 ${Math.max(9, fontSize * 0.68)}px Geist Mono, monospace`;
+      ctx.fillText(
+        formatDims(item.widthFt, item.depthFt),
+        0,
+        labelY + fontSize * 1.12,
+      );
       ctx.restore();
     }
 
@@ -1782,6 +2156,7 @@ export function WillItFitApp() {
       setShowClearances(imported.showClearances ?? true);
       setSnapToGrid(imported.snapToGrid ?? true);
       setSelectedId(null);
+      setCopiedFurniture(null);
       setDraftLine(null);
       setDraftMeasurement(null);
       setShouldFitPlan(true);
@@ -2227,6 +2602,27 @@ export function WillItFitApp() {
                           value={selectedItem.rotation}
                         />
                         <div className="mt-3 grid grid-cols-2 gap-2">
+                          <button
+                            className="flex items-center justify-center gap-2 rounded-[6px] border border-[#223a54]/15 bg-white px-3 py-2.5 text-sm font-semibold text-[#223a54] transition hover:bg-[#f6efe3]"
+                            onClick={copySelected}
+                            type="button"
+                          >
+                            <Copy size={16} />
+                            Copy
+                          </button>
+                          <button
+                            className={`flex items-center justify-center gap-2 rounded-[6px] border border-[#223a54]/15 px-3 py-2.5 text-sm font-semibold text-[#223a54] transition ${
+                              copiedFurniture
+                                ? "bg-white hover:bg-[#f6efe3]"
+                                : "bg-white/50 opacity-50"
+                            }`}
+                            disabled={!copiedFurniture}
+                            onClick={pasteFurniture}
+                            type="button"
+                          >
+                            <ClipboardPaste size={16} />
+                            Paste
+                          </button>
                           <button
                             className="flex items-center justify-center gap-2 rounded-[6px] border border-[#223a54]/15 bg-white px-3 py-2.5 text-sm font-semibold text-[#223a54] transition hover:bg-[#f6efe3]"
                             onClick={duplicateSelected}
@@ -2793,7 +3189,6 @@ export function WillItFitApp() {
                     const isSelected = item.id === selectedId;
                     const isOverlapping = overlapIds.has(item.id);
                     const isClearanceIssue = clearanceConflictIds.has(item.id);
-                    const fontSize = clamp(Math.min(width, depth) / 5, 10, 18);
 
                     return (
                       <Group
@@ -2868,47 +3263,17 @@ export function WillItFitApp() {
                         }}
                         rotation={item.rotation}
                         x={item.x}
-                        y={item.y}
-                      >
-                        <Rect
-                          cornerRadius={7}
-                          fill={item.color}
-                          height={depth}
-                          offsetX={width / 2}
-                          offsetY={depth / 2}
-                          opacity={0.95}
-                          shadowBlur={isSelected ? 10 : 0}
-                          shadowColor="rgba(34, 58, 84, 0.25)"
-                          stroke={
-                            isOverlapping || isClearanceIssue
-                              ? "#c34d36"
-                              : item.accent
-                          }
-                          strokeWidth={
-                            isOverlapping || isClearanceIssue
-                              ? 4 / stageScale
-                              : 2 / stageScale
-                          }
-                          width={width}
-                        />
-                        <Text
-                          align="center"
-                          fill="#1e2725"
-                          fontFamily="Geist, system-ui, sans-serif"
-                          fontSize={fontSize}
-                          fontStyle="700"
-                          height={depth}
-                          offsetX={width / 2}
-                          offsetY={depth / 2}
-                          padding={6}
-                          text={`${item.name}\n${formatDims(
-                            item.widthFt,
-                            item.depthFt,
-                          )}`}
-                          verticalAlign="middle"
-                          width={width}
-                        />
-                      </Group>
+	                        y={item.y}
+	                      >
+	                        <BlueprintFurnitureShape
+	                          depth={depth}
+	                          hasIssue={isOverlapping || isClearanceIssue}
+	                          isSelected={isSelected}
+	                          item={item}
+	                          stageScale={stageScale}
+	                          width={width}
+	                        />
+	                      </Group>
                     );
                   })}
 
@@ -3088,6 +3453,27 @@ export function WillItFitApp() {
                 >
                   <RotateCw size={16} />
                   Rotate
+                </button>
+                <button
+                  className="flex items-center justify-center gap-2 rounded-[6px] border border-[#223a54]/15 bg-white px-3 py-2.5 text-sm font-semibold text-[#223a54] transition hover:bg-[#f6efe3]"
+                  onClick={copySelected}
+                  type="button"
+                >
+                  <Copy size={16} />
+                  Copy
+                </button>
+                <button
+                  className={`flex items-center justify-center gap-2 rounded-[6px] border border-[#223a54]/15 px-3 py-2.5 text-sm font-semibold text-[#223a54] transition ${
+                    copiedFurniture
+                      ? "bg-white hover:bg-[#f6efe3]"
+                      : "bg-white/50 opacity-50"
+                  }`}
+                  disabled={!copiedFurniture}
+                  onClick={pasteFurniture}
+                  type="button"
+                >
+                  <ClipboardPaste size={16} />
+                  Paste
                 </button>
                 <button
                   className="flex items-center justify-center gap-2 rounded-[6px] border border-[#223a54]/15 bg-white px-3 py-2.5 text-sm font-semibold text-[#223a54] transition hover:bg-[#f6efe3]"
@@ -3406,6 +3792,427 @@ function MetricTile({
       </div>
       <div className="mt-1 font-mono text-sm font-bold">{value}</div>
     </div>
+  );
+}
+
+function BlueprintFurnitureShape({
+  depth,
+  hasIssue,
+  isSelected,
+  item,
+  stageScale,
+  width,
+}: {
+  depth: number;
+  hasIssue: boolean;
+  isSelected: boolean;
+  item: FurnitureItem;
+  stageScale: number;
+  width: number;
+}) {
+  const symbol = getFurnitureSymbol(item);
+  const strokeColor = hasIssue ? "#c34d36" : item.accent;
+  const labelFontSize = clamp(Math.min(width, depth) / 6, 9, 16);
+  const dimFontSize = clamp(labelFontSize * 0.68, 7, 11);
+  const labelBlockHeight = Math.max(24, labelFontSize + dimFontSize + 8);
+  const labelY = depth / 2 - labelBlockHeight - 3;
+
+  return (
+    <>
+      <Rect
+        cornerRadius={7}
+        fill={item.color}
+        height={depth}
+        listening
+        opacity={0.95}
+        shadowBlur={isSelected ? 10 : 0}
+        shadowColor="rgba(34, 58, 84, 0.25)"
+        stroke={strokeColor}
+        strokeWidth={hasIssue ? 4 / stageScale : 2 / stageScale}
+        width={width}
+        x={-width / 2}
+        y={-depth / 2}
+      />
+      <BlueprintFurnitureDetails
+        accent={strokeColor}
+        depth={depth}
+        stageScale={stageScale}
+        symbol={symbol}
+        width={width}
+      />
+      <Text
+        align="center"
+        fill="#1e2725"
+        fontFamily="Geist, system-ui, sans-serif"
+        fontSize={labelFontSize}
+        fontStyle="700"
+        height={labelFontSize + 4}
+        listening={false}
+        text={item.name}
+        width={width}
+        x={-width / 2}
+        y={labelY}
+      />
+      <Text
+        align="center"
+        fill="#43514e"
+        fontFamily="Geist Mono, monospace"
+        fontSize={dimFontSize}
+        fontStyle="700"
+        height={dimFontSize + 4}
+        listening={false}
+        text={formatDims(item.widthFt, item.depthFt)}
+        width={width}
+        x={-width / 2}
+        y={labelY + labelFontSize + 5}
+      />
+    </>
+  );
+}
+
+function BlueprintFurnitureDetails({
+  accent,
+  depth,
+  stageScale,
+  symbol,
+  width,
+}: {
+  accent: string;
+  depth: number;
+  stageScale: number;
+  symbol: FurnitureSymbol;
+  width: number;
+}) {
+  const strokeWidth = clamp(Math.min(width, depth) / 36, 1.4, 3.2) / stageScale;
+  const pad = Math.max(5, Math.min(width, depth) * 0.1);
+  const left = -width / 2;
+  const top = -depth / 2;
+  const right = width / 2;
+  const bottom = depth / 2;
+  const detailFill = "rgba(255, 255, 255, 0.28)";
+  const detailProps = {
+    listening: false,
+    stroke: accent,
+    strokeWidth,
+  };
+
+  if (symbol === "bed") {
+    const pillowCount = width > 70 ? 2 : 1;
+    const pillowGap = Math.max(4, width * 0.04);
+    const pillowHeight = clamp(depth * 0.18, 10, 26);
+    const pillowWidth =
+      (width - pad * 2 - pillowGap * (pillowCount - 1)) / pillowCount;
+    const blanketY = top + pad + pillowHeight + pad * 0.75;
+
+    return (
+      <>
+        {Array.from({ length: pillowCount }).map((_, index) => (
+          <Rect
+            cornerRadius={5}
+            fill={detailFill}
+            height={pillowHeight}
+            key={`pillow-${index}`}
+            width={pillowWidth}
+            x={left + pad + index * (pillowWidth + pillowGap)}
+            y={top + pad}
+            {...detailProps}
+          />
+        ))}
+        <BlueprintLineSegments
+          accent={accent}
+          segments={[
+            [left + pad, blanketY, right - pad, blanketY],
+            [0, blanketY, 0, bottom - pad],
+          ]}
+          strokeWidth={strokeWidth}
+        />
+      </>
+    );
+  }
+
+  if (symbol === "crib") {
+    const railGap = Math.max(8, width / 5);
+    const railSegments: [number, number, number, number][] = [];
+
+    for (let x = left + pad + railGap; x < right - pad; x += railGap) {
+      railSegments.push([x, top + pad, x, bottom - pad]);
+    }
+
+    return (
+      <>
+        <Rect
+          cornerRadius={5}
+          height={depth - pad * 2}
+          width={width - pad * 2}
+          x={left + pad}
+          y={top + pad}
+          {...detailProps}
+        />
+        <BlueprintLineSegments
+          accent={accent}
+          segments={railSegments}
+          strokeWidth={strokeWidth}
+        />
+      </>
+    );
+  }
+
+  if (symbol === "sofa" || symbol === "sectional") {
+    const arm = clamp(depth * 0.18, 8, 22);
+    const cushionSegments: [number, number, number, number][] = [
+      [left + pad, top + pad + arm, right - pad, top + pad + arm],
+      [left + width / 3, top + pad + arm, left + width / 3, bottom - pad],
+      [
+        left + (width / 3) * 2,
+        top + pad + arm,
+        left + (width / 3) * 2,
+        bottom - pad,
+      ],
+    ];
+    const sectionalLines =
+      symbol === "sectional"
+        ? ([
+            [
+              left + width * 0.58,
+              top + depth * 0.08,
+              left + width * 0.58,
+              bottom - pad,
+            ],
+            [
+              left + width * 0.58,
+              top + depth * 0.54,
+              right - pad,
+              top + depth * 0.54,
+            ],
+          ] satisfies [number, number, number, number][])
+        : [];
+
+    return (
+      <>
+        <Rect
+          cornerRadius={6}
+          height={depth - pad * 2}
+          width={width - pad * 2}
+          x={left + pad}
+          y={top + pad}
+          {...detailProps}
+        />
+        <BlueprintLineSegments
+          accent={accent}
+          segments={[...cushionSegments, ...sectionalLines]}
+          strokeWidth={strokeWidth}
+        />
+      </>
+    );
+  }
+
+  if (symbol === "dining") {
+    const tableWidth = width * 0.55;
+    const tableDepth = depth * 0.42;
+    const chairWidth = clamp(width * 0.13, 9, 22);
+    const chairDepth = clamp(depth * 0.16, 8, 18);
+    const sideChairWidth = clamp(width * 0.1, 8, 18);
+    const sideChairDepth = clamp(depth * 0.26, 10, 24);
+    const chairPositions = [
+      { x: -width * 0.22 - chairWidth / 2, y: top + pad },
+      { x: width * 0.22 - chairWidth / 2, y: top + pad },
+      { x: -width * 0.22 - chairWidth / 2, y: bottom - pad - chairDepth },
+      { x: width * 0.22 - chairWidth / 2, y: bottom - pad - chairDepth },
+    ];
+
+    return (
+      <>
+        <Rect
+          cornerRadius={8}
+          fill={detailFill}
+          height={tableDepth}
+          width={tableWidth}
+          x={-tableWidth / 2}
+          y={-tableDepth / 2}
+          {...detailProps}
+        />
+        {chairPositions.map((chair, index) => (
+          <Rect
+            cornerRadius={4}
+            height={chairDepth}
+            key={`chair-${index}`}
+            width={chairWidth}
+            x={chair.x}
+            y={chair.y}
+            {...detailProps}
+          />
+        ))}
+        <Rect
+          cornerRadius={4}
+          height={sideChairDepth}
+          width={sideChairWidth}
+          x={left + pad}
+          y={-sideChairDepth / 2}
+          {...detailProps}
+        />
+        <Rect
+          cornerRadius={4}
+          height={sideChairDepth}
+          width={sideChairWidth}
+          x={right - pad - sideChairWidth}
+          y={-sideChairDepth / 2}
+          {...detailProps}
+        />
+      </>
+    );
+  }
+
+  if (symbol === "desk") {
+    const deskDepth = depth * 0.42;
+
+    return (
+      <>
+        <Rect
+          cornerRadius={5}
+          fill={detailFill}
+          height={deskDepth}
+          width={width - pad * 2}
+          x={left + pad}
+          y={top + pad}
+          {...detailProps}
+        />
+        <BlueprintLineSegments
+          accent={accent}
+          segments={[
+            [
+              left + pad + width * 0.22,
+              top + pad,
+              left + pad + width * 0.22,
+              top + pad + deskDepth,
+            ],
+            [
+              right - pad - width * 0.22,
+              top + pad,
+              right - pad - width * 0.22,
+              top + pad + deskDepth,
+            ],
+          ]}
+          strokeWidth={strokeWidth}
+        />
+        <Rect
+          cornerRadius={5}
+          height={depth * 0.18}
+          width={width * 0.36}
+          x={-width * 0.18}
+          y={bottom - pad - depth * 0.22}
+          {...detailProps}
+        />
+      </>
+    );
+  }
+
+  if (symbol === "dresser" || symbol === "nightstand") {
+    const rows = symbol === "dresser" ? 3 : 2;
+    const drawerSegments: [number, number, number, number][] = [];
+    const pullSegments: [number, number, number, number][] = [];
+
+    for (let row = 1; row < rows; row += 1) {
+      const y = top + pad + ((depth - pad * 2) / rows) * row;
+      drawerSegments.push([left + pad, y, right - pad, y]);
+    }
+
+    for (let row = 0; row < rows; row += 1) {
+      const y = top + pad + ((depth - pad * 2) / rows) * (row + 0.5);
+      pullSegments.push([-width * 0.08, y, width * 0.08, y]);
+    }
+
+    return (
+      <>
+        <Rect
+          cornerRadius={5}
+          height={depth - pad * 2}
+          width={width - pad * 2}
+          x={left + pad}
+          y={top + pad}
+          {...detailProps}
+        />
+        <BlueprintLineSegments
+          accent={accent}
+          segments={drawerSegments}
+          strokeWidth={strokeWidth}
+        />
+        <BlueprintLineSegments
+          accent={accent}
+          segments={pullSegments}
+          strokeWidth={strokeWidth}
+        />
+      </>
+    );
+  }
+
+  if (symbol === "coffee") {
+    return (
+      <>
+        <Rect
+          cornerRadius={10}
+          fill={detailFill}
+          height={depth - pad * 2}
+          width={width - pad * 2}
+          x={left + pad}
+          y={top + pad}
+          {...detailProps}
+        />
+        <BlueprintLineSegments
+          accent={accent}
+          segments={[
+            [left + pad * 1.5, -depth * 0.12, right - pad * 1.5, -depth * 0.12],
+            [left + pad * 1.5, depth * 0.12, right - pad * 1.5, depth * 0.12],
+          ]}
+          strokeWidth={strokeWidth}
+        />
+      </>
+    );
+  }
+
+  return (
+    <>
+      <Rect
+        cornerRadius={5}
+        height={depth - pad * 2}
+        width={width - pad * 2}
+        x={left + pad}
+        y={top + pad}
+        {...detailProps}
+      />
+      <BlueprintLineSegments
+        accent={accent}
+        segments={[
+          [left + pad, top + pad, right - pad, bottom - pad],
+          [right - pad, top + pad, left + pad, bottom - pad],
+        ]}
+        strokeWidth={strokeWidth}
+      />
+    </>
+  );
+}
+
+function BlueprintLineSegments({
+  accent,
+  segments,
+  strokeWidth,
+}: {
+  accent: string;
+  segments: [number, number, number, number][];
+  strokeWidth: number;
+}) {
+  return (
+    <>
+      {segments.map(([x1, y1, x2, y2], index) => (
+        <Line
+          key={`${x1}-${y1}-${x2}-${y2}-${index}`}
+          lineCap="round"
+          listening={false}
+          points={[x1, y1, x2, y2]}
+          stroke={accent}
+          strokeWidth={strokeWidth}
+        />
+      ))}
+    </>
   );
 }
 
