@@ -824,6 +824,15 @@ export function WillItFitApp() {
     }
 
     const holdCanvasGesture = (event: TouchEvent) => {
+      const target = event.target;
+
+      if (
+        target instanceof HTMLElement &&
+        target.closest("button, input, select, textarea, a, label")
+      ) {
+        return;
+      }
+
       if (event.cancelable) {
         event.preventDefault();
       }
