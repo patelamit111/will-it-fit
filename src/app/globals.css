@@ -28,7 +28,8 @@ html {
 }
 
 body {
-  min-height: 100vh;
+  min-height: 100svh;
+  overscroll-behavior: none;
   background:
     radial-gradient(circle at 10% 8%, rgba(195, 77, 54, 0.12), transparent 30%),
     linear-gradient(135deg, #f8efe1 0%, #f4ecdf 44%, #e8efe9 100%);
@@ -46,6 +47,11 @@ input {
 }
 
 .canvas-grid {
+  touch-action: none;
+  overscroll-behavior: contain;
+  user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
   background-color: #e5dccb;
   background-image:
     linear-gradient(rgba(34, 58, 84, 0.13) 1px, transparent 1px),
@@ -54,6 +60,10 @@ input {
     linear-gradient(90deg, rgba(34, 58, 84, 0.06) 1px, transparent 1px);
   background-position: -1px -1px;
   background-size: 72px 72px, 72px 72px, 12px 12px, 12px 12px;
+}
+
+.canvas-grid canvas {
+  touch-action: none;
 }
 
 .paper-panel {

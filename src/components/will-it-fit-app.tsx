@@ -65,6 +65,17 @@ type CalibrationLine = {
   y2: number;
 };
 
+type Point = {
+  x: number;
+  y: number;
+};
+
+type PinchGesture = {
+  startDistance: number;
+  startScale: number;
+  worldCenter: Point;
+};
+
 type Calibration = {
   pixelsPerFoot: number | null;
   realLengthFt: number | null;
@@ -260,6 +271,17 @@ function formatDims(widthFt: number, depthFt: number) {
 
 function distance(line: CalibrationLine) {
   return Math.hypot(line.x2 - line.x1, line.y2 - line.y1);
+}
+
+function pointDistance(first: Point, second: Point) {
+  return Math.hypot(second.x - first.x, second.y - first.y);
+}
+
+function midpoint(first: Point, second: Point) {
+  return {
+    x: (first.x + second.x) / 2,
+    y: (first.y + second.y) / 2,
+  };
 }
 
 function getItemPixels(item: FurnitureItem, pixelsPerFoot: number) {
@@ -520,6 +542,8 @@ export function WillItFitApp() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const itemRefs = useRef<Record<string, Konva.Group | null>>({});
   const calibrationStartRef = useRef<{ x: number; y: number } | null>(null);
+  const pinchGestureRef = useRef<PinchGesture | null>(null);
+  const interactionRef = useRef(false);
 
   const pixelsPerFoot = calibration.pixelsPerFoot ?? DEFAULT_PIXELS_PER_FOOT;
   const isCalibrated = calibration.pixelsPerFoot !== null;
@@ -601,15 +625,19 @@ export function WillItFitApp() {
       return;
     }
 
-    const payload: SavedLayout = { plan, calibration, furniture };
+    const saveTimer = window.setTimeout(() => {
+      const payload: SavedLayout = { plan, calibration, furniture };
 
-    try {
-      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
-    } catch {
-      window.setTimeout(() => {
+      try {
+        window.localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+      } catch {
         setStatus("Local save is full. Export before refreshing.");
-      }, 0);
-    }
+      }
+    }, interactionRef.current ? 900 : 350);
+
+    return () => {
+      window.clearTimeout(saveTimer);
+    };
   }, [calibration, furniture, hasHydrated, plan]);
 
   useEffect(() => {
@@ -700,6 +728,76 @@ export function WillItFitApp() {
       y: (pointer.y - stage.y()) / stage.scaleY(),
     };
   }, []);
+
+  const getTouchPair = (event: TouchEvent) => {
+    const stage = stageRef.current;
+    const rect = stage?.container().getBoundingClientRect();
+
+    if (!stage || !rect || event.touches.length < 2) {
+      return null;
+    }
+
+    const first = event.touches[0];
+    const second = event.touches[1];
+
+    return {
+      first: {
+        x: first.clientX - rect.left,
+        y: first.clientY - rect.top,
+      },
+      second: {
+        x: second.clientX - rect.left,
+        y: second.clientY - rect.top,
+      },
+    };
+  };
+
+  const startPinch = (event: TouchEvent) => {
+    const pair = getTouchPair(event);
+    const stage = stageRef.current;
+
+    if (!pair || !stage) {
+      return;
+    }
+
+    const center = midpoint(pair.first, pair.second);
+    const startScale = stage.scaleX();
+    stage.stopDrag();
+    calibrationStartRef.current = null;
+    setDraftLine(null);
+    interactionRef.current = true;
+    pinchGestureRef.current = {
+      startDistance: pointDistance(pair.first, pair.second),
+      startScale,
+      worldCenter: {
+        x: (center.x - stage.x()) / startScale,
+        y: (center.y - stage.y()) / startScale,
+      },
+    };
+  };
+
+  const updatePinch = (event: TouchEvent) => {
+    const gesture = pinchGestureRef.current;
+    const pair = getTouchPair(event);
+
+    if (!gesture || !pair) {
+      return;
+    }
+
+    const center = midpoint(pair.first, pair.second);
+    const nextScale = clamp(
+      gesture.startScale *
+        (pointDistance(pair.first, pair.second) / gesture.startDistance),
+      0.08,
+      5,
+    );
+
+    setStageScale(nextScale);
+    setStagePosition({
+      x: center.x - gesture.worldCenter.x * nextScale,
+      y: center.y - gesture.worldCenter.y * nextScale,
+    });
+  };
 
   const addFurniture = useCallback(
     (template: FurnitureTemplate, position?: { x: number; y: number }) => {
@@ -965,6 +1063,19 @@ export function WillItFitApp() {
   const handleStageMouseDown = (
     event: Konva.KonvaEventObject<MouseEvent | TouchEvent>,
   ) => {
+    if ("touches" in event.evt) {
+      event.evt.preventDefault();
+
+      if (event.evt.touches.length >= 2) {
+        startPinch(event.evt);
+        return;
+      }
+    }
+
+    if (pinchGestureRef.current) {
+      return;
+    }
+
     const point = getWorldPointer();
 
     if (tool === "calibrate" && point) {
@@ -985,7 +1096,25 @@ export function WillItFitApp() {
     }
   };
 
-  const handleStageMouseMove = () => {
+  const handleStageMouseMove = (
+    event?: Konva.KonvaEventObject<MouseEvent | TouchEvent>,
+  ) => {
+    if (event && "touches" in event.evt) {
+      event.evt.preventDefault();
+
+      if (event.evt.touches.length >= 2) {
+        if (!pinchGestureRef.current) {
+          startPinch(event.evt);
+        }
+        updatePinch(event.evt);
+        return;
+      }
+    }
+
+    if (pinchGestureRef.current) {
+      return;
+    }
+
     if (tool !== "calibrate" || !calibrationStartRef.current) {
       return;
     }
@@ -1004,7 +1133,21 @@ export function WillItFitApp() {
     });
   };
 
-  const handleStageMouseUp = () => {
+  const handleStageMouseUp = (
+    event?: Konva.KonvaEventObject<MouseEvent | TouchEvent>,
+  ) => {
+    if (event && "touches" in event.evt) {
+      event.evt.preventDefault();
+
+      if (pinchGestureRef.current) {
+        if (event.evt.touches.length < 2) {
+          pinchGestureRef.current = null;
+          interactionRef.current = false;
+        }
+        return;
+      }
+    }
+
     if (tool !== "calibrate" || !draftLine || !calibrationStartRef.current) {
       calibrationStartRef.current = null;
       return;
@@ -1275,7 +1418,7 @@ export function WillItFitApp() {
   const calibrationLength = calibrationLine ? distance(calibrationLine) : 0;
 
   return (
-    <main className="min-h-screen px-4 py-4 text-[#1e2725] sm:px-5 lg:px-6">
+    <main className="min-h-[100svh] px-4 py-4 text-[#1e2725] sm:px-5 lg:px-6">
       <header className="mx-auto mb-4 flex max-w-[1800px] flex-col gap-4 rounded-[8px] border border-[#1e2725]/10 bg-[#fbf7ee]/80 px-4 py-4 shadow-sm backdrop-blur md:flex-row md:items-center md:justify-between">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-3">
@@ -1336,7 +1479,7 @@ export function WillItFitApp() {
       />
 
       <section className="mx-auto grid max-w-[1800px] gap-4 lg:grid-cols-[310px_minmax(0,1fr)_310px]">
-        <aside className="paper-panel max-h-[calc(100vh-136px)] overflow-auto rounded-[8px] p-4">
+        <aside className="paper-panel order-2 max-h-[calc(100svh-136px)] overflow-auto rounded-[8px] p-4 lg:order-1">
           <PanelTitle icon={<Upload size={17} />} title="Floor plan" />
           <div
             className="mt-3 rounded-[8px] border border-dashed border-[#223a54]/30 bg-white/60 p-3"
@@ -1517,8 +1660,8 @@ export function WillItFitApp() {
           </div>
         </aside>
 
-        <section className="min-w-0">
-          <div className="paper-panel flex min-h-[calc(100vh-136px)] flex-col overflow-hidden rounded-[8px]">
+        <section className="order-1 min-w-0 lg:order-2">
+          <div className="paper-panel flex min-h-[calc(100svh-136px)] flex-col overflow-hidden rounded-[8px]">
             <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#1e2725]/10 bg-[#fbf7ee]/88 px-3 py-3">
               <div className="flex flex-wrap items-center gap-2">
                 <ToolButton
@@ -1545,7 +1688,7 @@ export function WillItFitApp() {
                   label="Zoom out"
                   onClick={() => zoomBy(0.84)}
                 />
-                <span className="min-w-14 rounded-[6px] bg-white px-2 py-1 text-center font-mono text-xs font-semibold text-[#4b5653]">
+                <span className="flex h-10 min-w-14 items-center justify-center rounded-[6px] bg-white px-2 text-center font-mono text-xs font-semibold text-[#4b5653]">
                   {Math.round(stageScale * 100)}%
                 </span>
                 <IconButton
@@ -1578,15 +1721,41 @@ export function WillItFitApp() {
               <Stage
                 draggable={tool === "pan"}
                 height={stageSize.height}
-                onDragEnd={(event) => {
+                onDragStart={(event) => {
+                  if (event.target === stageRef.current) {
+                    interactionRef.current = true;
+                  }
+                }}
+                onDragMove={(event) => {
+                  const stage = stageRef.current;
+
+                  if (event.target !== stage || !stage) {
+                    return;
+                  }
+
+                  interactionRef.current = true;
                   setStagePosition({
-                    x: event.target.x(),
-                    y: event.target.y(),
+                    x: stage.x(),
+                    y: stage.y(),
+                  });
+                }}
+                onDragEnd={(event) => {
+                  const stage = stageRef.current;
+
+                  if (event.target !== stage || !stage) {
+                    return;
+                  }
+
+                  interactionRef.current = false;
+                  setStagePosition({
+                    x: stage.x(),
+                    y: stage.y(),
                   });
                 }}
                 onMouseDown={handleStageMouseDown}
                 onMouseMove={handleStageMouseMove}
                 onMouseUp={handleStageMouseUp}
+                onTouchCancel={handleStageMouseUp}
                 onTouchEnd={handleStageMouseUp}
                 onTouchMove={handleStageMouseMove}
                 onTouchStart={handleStageMouseDown}
@@ -1663,7 +1832,13 @@ export function WillItFitApp() {
                           setSelectedId(item.id);
                           setTool("move");
                         }}
+                        onDragStart={(event) => {
+                          event.cancelBubble = true;
+                          interactionRef.current = true;
+                        }}
                         onDragEnd={(event) => {
+                          event.cancelBubble = true;
+                          interactionRef.current = false;
                           const node = event.target;
                           setFurniture((items) =>
                             items.map((piece) =>
@@ -1810,7 +1985,7 @@ export function WillItFitApp() {
           </div>
         </section>
 
-        <aside className="paper-panel max-h-[calc(100vh-136px)] overflow-auto rounded-[8px] p-4">
+        <aside className="paper-panel order-3 max-h-[calc(100svh-136px)] overflow-auto rounded-[8px] p-4">
           <PanelTitle icon={<Move size={17} />} title="Selection" />
           {selectedItem ? (
             <div className="mt-3 space-y-4">
@@ -2052,7 +2227,7 @@ function ToolButton({
 }) {
   return (
     <button
-      className={`inline-flex h-9 items-center justify-center gap-2 rounded-[6px] px-3 text-sm font-semibold transition ${
+      className={`inline-flex h-10 items-center justify-center gap-2 rounded-[6px] px-3 text-sm font-semibold transition ${
         active
           ? "bg-[#223a54] text-white shadow-sm"
           : "border border-[#223a54]/15 bg-white text-[#223a54] hover:bg-[#f6efe3]"
@@ -2078,7 +2253,7 @@ function IconButton({
 }) {
   return (
     <button
-      className="inline-flex h-9 w-9 items-center justify-center rounded-[6px] border border-[#223a54]/15 bg-white text-[#223a54] transition hover:bg-[#f6efe3]"
+      className="inline-flex h-10 w-10 items-center justify-center rounded-[6px] border border-[#223a54]/15 bg-white text-[#223a54] transition hover:bg-[#f6efe3]"
       onClick={onClick}
       title={label}
       type="button"
